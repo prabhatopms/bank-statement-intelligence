@@ -26,7 +26,7 @@ export async function POST(request: NextRequest) {
     }
 
     const filename = `${userId}/${Date.now()}-${file.name}`;
-    const blob = await put(filename, file, { access: 'private' });
+    const blob = await put(filename, file, { access: 'public' });
 
     const encryptedPassword = password ? encrypt(password) : null;
 
