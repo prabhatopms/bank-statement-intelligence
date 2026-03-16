@@ -26,8 +26,8 @@ export default function DocumentsPage() {
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [password, setPassword] = useState('');
-  const [llmProvider, setLlmProvider] = useState('anthropic');
-  const [llmModel, setLlmModel] = useState('claude-sonnet-4-20250514');
+  const [llmProvider, setLlmProvider] = useState('openai');
+  const [llmModel, setLlmModel] = useState('gpt-4o');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
 

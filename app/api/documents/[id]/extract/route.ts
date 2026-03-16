@@ -15,7 +15,7 @@ function shouldFlag(description: string): boolean {
 }
 
 export async function POST(
-  request: NextRequest,
+  _request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
@@ -43,12 +43,35 @@ export async function POST(
 
     let pdfPassword: string | undefined;
     if (doc.password_hint) {
-      pdfPassword = decrypt(doc.password_hint);
+      try {
+        pdfPassword = decrypt(doc.password_hint);
+      } catch (e) {
+        await sql`UPDATE documents SET status = 'failed' WHERE id = ${documentId}`;
+        return NextResponse.json({ error: `Password decryption failed — check ENCRYPTION_KEY env var: ${e instanceof Error ? e.message : String(e)}` }, { status: 500 });
+      }
     }
 
     const pdfResponse = await fetch(doc.blob_url);
+    if (!pdfResponse.ok) {
+      await sql`UPDATE documents SET status = 'failed' WHERE id = ${documentId}`;
+      return NextResponse.json({ error: `Failed to download PDF from storage: ${pdfResponse.status} ${pdfResponse.statusText}` }, { status: 500 });
+    }
     const pdfBuffer = Buffer.from(await pdfResponse.arrayBuffer());
-    const extractedText = await extractTextFromPDF(pdfBuffer, pdfPassword);
+
+    let extractedText: string;
+    try {
+      extractedText = await extractTextFromPDF(pdfBuffer, pdfPassword);
+    } catch (e) {
+      await sql`UPDATE documents SET status = 'failed' WHERE id = ${documentId}`;
+      const msg = e instanceof Error ? e.message : String(e);
+      const hint = msg.toLowerCase().includes('password') ? `${msg} — make sure the correct PDF password was entered during upload` : msg;
+      return NextResponse.json({ error: `PDF parsing failed: ${hint}` }, { status: 422 });
+    }
+
+    if (!extractedText || extractedText.trim().length < 10) {
+      await sql`UPDATE documents SET status = 'failed' WHERE id = ${documentId}`;
+      return NextResponse.json({ error: 'PDF appears to be empty or image-based (scanned). Only text-based PDFs are supported.' }, { status: 422 });
+    }
 
     const model = getLLMModel(doc.llm_provider || 'openai', doc.llm_model || 'gpt-4o');
 
