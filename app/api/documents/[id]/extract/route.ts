@@ -50,7 +50,7 @@ type RawTx = {
 };
 
 export async function POST(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   const { userId } = await auth();
@@ -60,6 +60,7 @@ export async function POST(
 
   const documentId = params.id;
   const encoder = new TextEncoder();
+  const abortSignal = request.signal;
 
   const stream = new TransformStream<Uint8Array, Uint8Array>();
   const writer = stream.writable.getWriter();
@@ -149,6 +150,7 @@ export async function POST(
             model,
             temperature: 0,
             maxTokens: 16000,
+            abortSignal,
             messages: [
               { role: 'system', content: SYSTEM_PROMPT },
               { role: 'user', content: `Extract all transactions from this bank statement text${chunks.length > 1 ? ` (part ${i + 1} of ${chunks.length})` : ''}. Return ONLY a raw JSON array.\n\n${chunks[i]}` },
@@ -219,9 +221,12 @@ export async function POST(
       send({ type: 'done', inserted, skipped, total: allTransactions.length });
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
+      const aborted = abortSignal.aborted || msg.toLowerCase().includes('abort');
       console.error('Extraction error:', msg);
-      try { await sql`UPDATE documents SET status = 'failed' WHERE id = ${documentId}`; } catch { /* ignore */ }
-      send({ type: 'error', message: msg });
+      try {
+        await sql`UPDATE documents SET status = ${aborted ? 'uploaded' : 'failed'} WHERE id = ${documentId}`;
+      } catch { /* ignore */ }
+      send({ type: aborted ? 'aborted' : 'error', message: aborted ? 'Extraction was terminated.' : msg });
     } finally {
       try { writer.close(); } catch { /* already closed */ }
     }

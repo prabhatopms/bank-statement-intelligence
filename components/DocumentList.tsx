@@ -1,7 +1,7 @@
 "use client"
 
-import { useState, useEffect, useRef } from 'react';
-import { FileText, Trash2, Download, Zap, Clock, CheckCircle, XCircle, Loader2, Terminal } from 'lucide-react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { FileText, Trash2, Download, Zap, Clock, CheckCircle, XCircle, Loader2, Terminal, StopCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
@@ -25,6 +25,8 @@ interface DocumentListProps {
   onRefresh: () => void;
 }
 
+interface LogEntry { time: string; message: string; kind: 'log' | 'error' | 'done' | 'aborted' }
+
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, { cls: string; icon: React.ReactNode }> = {
     uploaded:   { cls: 'bg-gray-100 text-gray-700',    icon: <Clock className="h-3 w-3" /> },
@@ -40,33 +42,50 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-interface LogEntry { time: string; message: string; type: 'log' | 'error' | 'done' }
+const ts = () => new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
 export function DocumentList({ documents, onRefresh }: DocumentListProps) {
   const [extractModal, setExtractModal] = useState<Document | null>(null);
   const [llmProvider, setLlmProvider] = useState('openai');
   const [llmModel, setLlmModel] = useState('gpt-4o');
-  const [activeLog, setActiveLog] = useState<{ docId: string; entries: LogEntry[] } | null>(null);
+
+  // logs[docId] = array of entries — persists across open/close
+  const [logs, setLogs] = useState<Record<string, LogEntry[]>>({});
+  // which doc's log panel is currently visible
+  const [visibleLog, setVisibleLog] = useState<string | null>(null);
+  // which docs are actively streaming
   const [extractingIds, setExtractingIds] = useState<Set<string>>(new Set());
+  // abort controllers keyed by docId
+  const abortControllers = useRef<Record<string, AbortController>>({});
   const logEndRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
 
-  // Auto-scroll log to bottom
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [activeLog?.entries.length]);
+  }, [logs, visibleLog]);
 
-  const now = () => new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const appendLog = useCallback((docId: string, entry: LogEntry) => {
+    setLogs(prev => ({ ...prev, [docId]: [...(prev[docId] ?? []), entry] }));
+  }, []);
 
   const handleExtract = async () => {
     if (!extractModal) return;
     const doc = extractModal;
     setExtractModal(null);
+
+    const controller = new AbortController();
+    abortControllers.current[doc.id] = controller;
+
+    // Reset log for this doc and show panel
+    setLogs(prev => ({ ...prev, [doc.id]: [{ time: ts(), message: `Starting extraction for ${doc.filename}...`, kind: 'log' }] }));
+    setVisibleLog(doc.id);
     setExtractingIds(prev => new Set(prev).add(doc.id));
-    setActiveLog({ docId: doc.id, entries: [{ time: now(), message: `Starting extraction for ${doc.filename}...`, type: 'log' }] });
 
     try {
-      const res = await fetch(`/api/documents/${doc.id}/extract`, { method: 'POST' });
+      const res = await fetch(`/api/documents/${doc.id}/extract`, {
+        method: 'POST',
+        signal: controller.signal,
+      });
 
       if (!res.body) throw new Error('No stream in response');
 
@@ -88,42 +107,48 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
             const event = JSON.parse(line.slice(6));
 
             if (event.type === 'log') {
-              setActiveLog(prev => prev ? {
-                ...prev,
-                entries: [...prev.entries, { time: now(), message: event.message, type: 'log' }]
-              } : prev);
+              appendLog(doc.id, { time: ts(), message: event.message, kind: 'log' });
             } else if (event.type === 'done') {
-              setActiveLog(prev => prev ? {
-                ...prev,
-                entries: [...prev.entries, {
-                  time: now(),
-                  message: `✅ Done — ${event.inserted} new transactions imported · ${event.skipped} duplicates skipped`,
-                  type: 'done'
-                }]
-              } : prev);
+              appendLog(doc.id, { time: ts(), message: `✅ Done — ${event.inserted} new transactions imported · ${event.skipped} duplicates skipped`, kind: 'done' });
               toast({ title: 'Extraction complete', description: `✓ ${event.inserted} new · ⊘ ${event.skipped} duplicates` });
               setExtractingIds(prev => { const s = new Set(prev); s.delete(doc.id); return s; });
+              delete abortControllers.current[doc.id];
+              onRefresh();
+            } else if (event.type === 'aborted') {
+              appendLog(doc.id, { time: ts(), message: '🛑 Extraction terminated by user.', kind: 'aborted' });
+              setExtractingIds(prev => { const s = new Set(prev); s.delete(doc.id); return s; });
+              delete abortControllers.current[doc.id];
               onRefresh();
             } else if (event.type === 'error') {
-              setActiveLog(prev => prev ? {
-                ...prev,
-                entries: [...prev.entries, { time: now(), message: `❌ Error: ${event.message}`, type: 'error' }]
-              } : prev);
+              appendLog(doc.id, { time: ts(), message: `❌ Error: ${event.message}`, kind: 'error' });
               toast({ title: 'Extraction failed', description: event.message, variant: 'destructive' });
               setExtractingIds(prev => { const s = new Set(prev); s.delete(doc.id); return s; });
+              delete abortControllers.current[doc.id];
               onRefresh();
             }
-          } catch { /* skip malformed SSE lines */ }
+          } catch { /* skip malformed lines */ }
         }
       }
     } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Unknown error';
-      setActiveLog(prev => prev ? {
-        ...prev,
-        entries: [...prev.entries, { time: now(), message: `❌ ${msg}`, type: 'error' }]
-      } : prev);
-      toast({ title: 'Extraction failed', description: msg, variant: 'destructive' });
+      const aborted = controller.signal.aborted;
+      if (!aborted) {
+        const msg = error instanceof Error ? error.message : 'Unknown error';
+        appendLog(doc.id, { time: ts(), message: `❌ ${msg}`, kind: 'error' });
+        toast({ title: 'Extraction failed', description: msg, variant: 'destructive' });
+      }
       setExtractingIds(prev => { const s = new Set(prev); s.delete(doc.id); return s; });
+      delete abortControllers.current[doc.id];
+      onRefresh();
+    }
+  };
+
+  const handleTerminate = (docId: string) => {
+    const controller = abortControllers.current[docId];
+    if (controller) {
+      controller.abort();
+      appendLog(docId, { time: ts(), message: '🛑 Termination requested — stopping after current operation...', kind: 'aborted' });
+      setExtractingIds(prev => { const s = new Set(prev); s.delete(docId); return s; });
+      delete abortControllers.current[docId];
       onRefresh();
     }
   };
@@ -134,7 +159,8 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
       const res = await fetch(`/api/documents?id=${doc.id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Delete failed');
       toast({ title: 'Document deleted' });
-      if (activeLog?.docId === doc.id) setActiveLog(null);
+      setLogs(prev => { const n = { ...prev }; delete n[doc.id]; return n; });
+      if (visibleLog === doc.id) setVisibleLog(null);
       onRefresh();
     } catch {
       toast({ title: 'Delete failed', variant: 'destructive' });
@@ -149,6 +175,9 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
       </div>
     );
   }
+
+  const activeLogEntries = visibleLog ? (logs[visibleLog] ?? []) : [];
+  const isActiveRunning = visibleLog ? extractingIds.has(visibleLog) : false;
 
   return (
     <>
@@ -165,10 +194,12 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
           </thead>
           <tbody>
             {documents.map((doc) => {
-              const isExtracting = extractingIds.has(doc.id) || doc.status === 'extracting';
-              const isActive = activeLog?.docId === doc.id;
+              const isExtracting = extractingIds.has(doc.id);
+              const hasLog = !!logs[doc.id]?.length;
+              const isShowingLog = visibleLog === doc.id;
+
               return (
-                <tr key={doc.id} className={`border-b last:border-0 hover:bg-muted/30 ${isActive ? 'bg-blue-50/40' : ''}`}>
+                <tr key={doc.id} className={`border-b last:border-0 hover:bg-muted/30 ${isShowingLog ? 'bg-blue-50/40' : ''}`}>
                   <td className="p-4">
                     <div className="flex items-center gap-2">
                       <FileText className="h-4 w-4 text-blue-500 flex-shrink-0" />
@@ -185,15 +216,33 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
                     {doc.llm_provider}/{doc.llm_model}
                   </td>
                   <td className="p-4">
-                    <div className="flex items-center justify-end gap-2">
-                      {isActive && activeLog && (
-                        <Button size="sm" variant="ghost" onClick={() => setActiveLog(null)} title="Hide log">
-                          <Terminal className="h-4 w-4 text-blue-500" />
+                    <div className="flex items-center justify-end gap-1">
+                      {/* Log toggle — shown if there's any log for this doc */}
+                      {hasLog && (
+                        <Button
+                          size="sm" variant="ghost"
+                          onClick={() => setVisibleLog(isShowingLog ? null : doc.id)}
+                          title={isShowingLog ? 'Hide log' : 'Show extraction log'}
+                          className={isShowingLog ? 'text-blue-600' : 'text-muted-foreground'}
+                        >
+                          <Terminal className="h-4 w-4" />
                         </Button>
                       )}
+
+                      {/* Terminate — only while extracting */}
+                      {isExtracting && (
+                        <Button
+                          size="sm" variant="ghost"
+                          className="text-red-500 hover:text-red-600"
+                          onClick={() => handleTerminate(doc.id)}
+                          title="Terminate extraction"
+                        >
+                          <StopCircle className="h-4 w-4" />
+                        </Button>
+                      )}
+
                       <Button
-                        size="sm"
-                        variant="outline"
+                        size="sm" variant="outline"
                         onClick={() => {
                           setLlmProvider(doc.llm_provider || 'openai');
                           setLlmModel(doc.llm_model || 'gpt-4o');
@@ -202,20 +251,22 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
                         disabled={isExtracting}
                       >
                         {isExtracting
-                          ? <><Loader2 className="h-4 w-4 animate-spin mr-1" /> Extracting...</>
-                          : <><Zap className="h-4 w-4 mr-1" /> Extract</>
-                        }
+                          ? <><Loader2 className="h-4 w-4 animate-spin mr-1" />Extracting...</>
+                          : <><Zap className="h-4 w-4 mr-1" />Extract</>}
                       </Button>
+
                       <Button size="sm" variant="ghost" asChild>
-                        <a href={doc.blob_url} target="_blank" rel="noreferrer">
+                        <a href={doc.blob_url} target="_blank" rel="noreferrer" title="Download PDF">
                           <Download className="h-4 w-4" />
                         </a>
                       </Button>
+
                       <Button
                         size="sm" variant="ghost"
                         className="text-destructive hover:text-destructive"
                         onClick={() => handleDelete(doc)}
                         disabled={isExtracting}
+                        title="Delete document"
                       >
                         <Trash2 className="h-4 w-4" />
                       </Button>
@@ -228,26 +279,43 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
         </table>
       </div>
 
-      {/* Live extraction log */}
-      {activeLog && (
+      {/* Live / historical log panel */}
+      {visibleLog && (
         <div className="rounded-lg border bg-gray-950 text-gray-100 text-xs font-mono overflow-hidden">
           <div className="flex items-center justify-between px-4 py-2 bg-gray-900 border-b border-gray-800">
             <div className="flex items-center gap-2 text-gray-400">
               <Terminal className="h-3.5 w-3.5" />
-              <span>Extraction log — {documents.find(d => d.id === activeLog.docId)?.filename}</span>
+              <span>
+                {documents.find(d => d.id === visibleLog)?.filename}
+                {isActiveRunning && <span className="ml-2 text-yellow-400 animate-pulse">● live</span>}
+              </span>
             </div>
-            <button onClick={() => setActiveLog(null)} className="text-gray-500 hover:text-gray-300 text-lg leading-none">×</button>
+            <div className="flex items-center gap-2">
+              {isActiveRunning && (
+                <button
+                  onClick={() => handleTerminate(visibleLog)}
+                  className="flex items-center gap-1 text-red-400 hover:text-red-300 text-xs px-2 py-0.5 border border-red-800 rounded"
+                >
+                  <StopCircle className="h-3 w-3" /> Terminate
+                </button>
+              )}
+              <button onClick={() => setVisibleLog(null)} className="text-gray-500 hover:text-gray-300 text-lg leading-none px-1">×</button>
+            </div>
           </div>
           <div className="p-4 space-y-1 max-h-72 overflow-y-auto">
-            {activeLog.entries.map((entry, i) => (
-              <div key={i} className={`flex gap-3 ${entry.type === 'error' ? 'text-red-400' : entry.type === 'done' ? 'text-green-400' : 'text-gray-300'}`}>
+            {activeLogEntries.map((entry, i) => (
+              <div key={i} className={`flex gap-3 ${
+                entry.kind === 'error'   ? 'text-red-400' :
+                entry.kind === 'done'    ? 'text-green-400' :
+                entry.kind === 'aborted' ? 'text-yellow-400' : 'text-gray-300'
+              }`}>
                 <span className="text-gray-600 shrink-0">{entry.time}</span>
                 <span>{entry.message}</span>
               </div>
             ))}
-            {extractingIds.has(activeLog.docId) && (
-              <div className="flex gap-3 text-yellow-400 animate-pulse">
-                <span className="text-gray-600 shrink-0">{now()}</span>
+            {isActiveRunning && (
+              <div className="flex gap-3 text-yellow-500 animate-pulse">
+                <span className="text-gray-600 shrink-0">{ts()}</span>
                 <span>⏳ Processing...</span>
               </div>
             )}
@@ -260,9 +328,7 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Extract Transactions</DialogTitle>
-            <DialogDescription>
-              Configure the LLM for extracting transactions from {extractModal?.filename}
-            </DialogDescription>
+            <DialogDescription>Configure the LLM for {extractModal?.filename}</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
@@ -278,14 +344,12 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
             </div>
             <div className="space-y-2">
               <Label>Model</Label>
-              <Input value={llmModel} onChange={(e) => setLlmModel(e.target.value)} placeholder="e.g. gpt-4o" />
+              <Input value={llmModel} onChange={e => setLlmModel(e.target.value)} placeholder="e.g. gpt-4o" />
             </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setExtractModal(null)}>Cancel</Button>
-            <Button onClick={handleExtract}>
-              <Zap className="h-4 w-4 mr-2" /> Run Extraction
-            </Button>
+            <Button onClick={handleExtract}><Zap className="h-4 w-4 mr-2" />Run Extraction</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
