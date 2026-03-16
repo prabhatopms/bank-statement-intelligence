@@ -1,9 +1,8 @@
 "use client"
 
 import { useState, useEffect, useRef } from 'react';
-import { FileText, Trash2, Download, Zap, Clock, CheckCircle, XCircle, Loader2 } from 'lucide-react';
+import { FileText, Trash2, Download, Zap, Clock, CheckCircle, XCircle, Loader2, Terminal } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -21,107 +20,121 @@ interface Document {
   extracted_at?: string;
 }
 
-interface ExtractionResult {
-  inserted: number;
-  skipped: number;
-  total: number;
-}
-
 interface DocumentListProps {
   documents: Document[];
   onRefresh: () => void;
 }
 
-function StatusBadge({ status, elapsedSec }: { status: string; elapsedSec?: number }) {
+function StatusBadge({ status }: { status: string }) {
   const map: Record<string, { cls: string; icon: React.ReactNode }> = {
-    uploaded:   { cls: 'bg-gray-100 text-gray-700',   icon: <Clock className="h-3 w-3" /> },
+    uploaded:   { cls: 'bg-gray-100 text-gray-700',    icon: <Clock className="h-3 w-3" /> },
     extracting: { cls: 'bg-yellow-100 text-yellow-800', icon: <Loader2 className="h-3 w-3 animate-spin" /> },
-    extracted:  { cls: 'bg-green-100 text-green-800',  icon: <CheckCircle className="h-3 w-3" /> },
-    failed:     { cls: 'bg-red-100 text-red-700',      icon: <XCircle className="h-3 w-3" /> },
+    extracted:  { cls: 'bg-green-100 text-green-800',   icon: <CheckCircle className="h-3 w-3" /> },
+    failed:     { cls: 'bg-red-100 text-red-700',       icon: <XCircle className="h-3 w-3" /> },
   };
   const { cls, icon } = map[status] || map.uploaded;
-  const timeStr = status === 'extracting' && elapsedSec ? ` ${elapsedSec}s` : '';
   return (
     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${cls}`}>
-      {icon}
-      {status}{timeStr}
+      {icon} {status}
     </span>
   );
 }
 
+interface LogEntry { time: string; message: string; type: 'log' | 'error' | 'done' }
+
 export function DocumentList({ documents, onRefresh }: DocumentListProps) {
-  const [extracting, setExtracting] = useState<string | null>(null);
   const [extractModal, setExtractModal] = useState<Document | null>(null);
   const [llmProvider, setLlmProvider] = useState('openai');
   const [llmModel, setLlmModel] = useState('gpt-4o');
-  const [elapsed, setElapsed] = useState<Record<string, number>>({});
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [activeLog, setActiveLog] = useState<{ docId: string; entries: LogEntry[] } | null>(null);
+  const [extractingIds, setExtractingIds] = useState<Set<string>>(new Set());
+  const logEndRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
 
-  const extractingDocs = documents.filter(d => d.status === 'extracting');
-
-  // Poll every 3s while any document is extracting
+  // Auto-scroll log to bottom
   useEffect(() => {
-    if (extractingDocs.length > 0) {
-      if (!pollRef.current) {
-        pollRef.current = setInterval(() => { onRefresh(); }, 3000);
-      }
-      if (!timerRef.current) {
-        timerRef.current = setInterval(() => {
-          setElapsed(prev => {
-            const next = { ...prev };
-            extractingDocs.forEach(d => { next[d.id] = (next[d.id] || 0) + 1; });
-            return next;
-          });
-        }, 1000);
-      }
-    } else {
-      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-    }
-    return () => {
-      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
-      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [extractingDocs.length]);
+    logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [activeLog?.entries.length]);
+
+  const now = () => new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
   const handleExtract = async () => {
     if (!extractModal) return;
-    const docId = extractModal.id;
-    setExtracting(docId);
-    setElapsed(prev => ({ ...prev, [docId]: 0 }));
+    const doc = extractModal;
     setExtractModal(null);
+    setExtractingIds(prev => new Set(prev).add(doc.id));
+    setActiveLog({ docId: doc.id, entries: [{ time: now(), message: `Starting extraction for ${doc.filename}...`, type: 'log' }] });
 
     try {
-      const res = await fetch(`/api/documents/${docId}/extract`, { method: 'POST' });
-      const data = await res.json();
-      if (res.status === 401) throw new Error('Unauthorized');
-      if (res.status === 404) throw new Error('Document not found');
-      // 202 = started in background, UI will poll for completion
-      toast({
-        title: 'Extraction started',
-        description: 'Running in background — the status will update automatically.',
-      });
-      onRefresh();
+      const res = await fetch(`/api/documents/${doc.id}/extract`, { method: 'POST' });
+
+      if (!res.body) throw new Error('No stream in response');
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const event = JSON.parse(line.slice(6));
+
+            if (event.type === 'log') {
+              setActiveLog(prev => prev ? {
+                ...prev,
+                entries: [...prev.entries, { time: now(), message: event.message, type: 'log' }]
+              } : prev);
+            } else if (event.type === 'done') {
+              setActiveLog(prev => prev ? {
+                ...prev,
+                entries: [...prev.entries, {
+                  time: now(),
+                  message: `✅ Done — ${event.inserted} new transactions imported · ${event.skipped} duplicates skipped`,
+                  type: 'done'
+                }]
+              } : prev);
+              toast({ title: 'Extraction complete', description: `✓ ${event.inserted} new · ⊘ ${event.skipped} duplicates` });
+              setExtractingIds(prev => { const s = new Set(prev); s.delete(doc.id); return s; });
+              onRefresh();
+            } else if (event.type === 'error') {
+              setActiveLog(prev => prev ? {
+                ...prev,
+                entries: [...prev.entries, { time: now(), message: `❌ Error: ${event.message}`, type: 'error' }]
+              } : prev);
+              toast({ title: 'Extraction failed', description: event.message, variant: 'destructive' });
+              setExtractingIds(prev => { const s = new Set(prev); s.delete(doc.id); return s; });
+              onRefresh();
+            }
+          } catch { /* skip malformed SSE lines */ }
+        }
+      }
     } catch (error) {
-      toast({
-        title: 'Extraction failed',
-        description: error instanceof Error ? error.message : 'Unknown error',
-        variant: 'destructive',
-      });
-      setExtracting(null);
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      setActiveLog(prev => prev ? {
+        ...prev,
+        entries: [...prev.entries, { time: now(), message: `❌ ${msg}`, type: 'error' }]
+      } : prev);
+      toast({ title: 'Extraction failed', description: msg, variant: 'destructive' });
+      setExtractingIds(prev => { const s = new Set(prev); s.delete(doc.id); return s; });
+      onRefresh();
     }
   };
 
   const handleDelete = async (doc: Document) => {
     if (!confirm(`Delete "${doc.filename}"? This will also delete all extracted transactions.`)) return;
-
     try {
       const res = await fetch(`/api/documents?id=${doc.id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Delete failed');
       toast({ title: 'Document deleted' });
+      if (activeLog?.docId === doc.id) setActiveLog(null);
       onRefresh();
     } catch {
       toast({ title: 'Delete failed', variant: 'destructive' });
@@ -151,99 +164,127 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
             </tr>
           </thead>
           <tbody>
-            {documents.map((doc) => (
-              <tr key={doc.id} className="border-b last:border-0 hover:bg-muted/30">
-                <td className="p-4">
-                  <div className="flex items-center gap-2">
-                    <FileText className="h-4 w-4 text-blue-500 flex-shrink-0" />
-                    <span className="font-medium truncate max-w-xs">{doc.filename}</span>
-                  </div>
-                </td>
-                <td className="p-4 text-muted-foreground">
-                  {new Date(doc.uploaded_at).toLocaleDateString()}
-                </td>
-                <td className="p-4">
-                  <StatusBadge status={doc.status} elapsedSec={elapsed[doc.id]} />
-                </td>
-                <td className="p-4 text-muted-foreground text-xs">
-                  <span className="font-mono">{doc.llm_provider}/{doc.llm_model}</span>
-                </td>
-                <td className="p-4">
-                  <div className="flex items-center justify-end gap-2">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => {
-                        setLlmProvider(doc.llm_provider || 'anthropic');
-                        setLlmModel(doc.llm_model || 'claude-sonnet-4-20250514');
-                        setExtractModal(doc);
-                      }}
-                      disabled={extracting === doc.id}
-                    >
-                      {extracting === doc.id ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <Zap className="h-4 w-4" />
+            {documents.map((doc) => {
+              const isExtracting = extractingIds.has(doc.id) || doc.status === 'extracting';
+              const isActive = activeLog?.docId === doc.id;
+              return (
+                <tr key={doc.id} className={`border-b last:border-0 hover:bg-muted/30 ${isActive ? 'bg-blue-50/40' : ''}`}>
+                  <td className="p-4">
+                    <div className="flex items-center gap-2">
+                      <FileText className="h-4 w-4 text-blue-500 flex-shrink-0" />
+                      <span className="font-medium truncate max-w-xs">{doc.filename}</span>
+                    </div>
+                  </td>
+                  <td className="p-4 text-muted-foreground">
+                    {new Date(doc.uploaded_at).toLocaleDateString()}
+                  </td>
+                  <td className="p-4">
+                    <StatusBadge status={isExtracting ? 'extracting' : doc.status} />
+                  </td>
+                  <td className="p-4 text-muted-foreground text-xs font-mono">
+                    {doc.llm_provider}/{doc.llm_model}
+                  </td>
+                  <td className="p-4">
+                    <div className="flex items-center justify-end gap-2">
+                      {isActive && activeLog && (
+                        <Button size="sm" variant="ghost" onClick={() => setActiveLog(null)} title="Hide log">
+                          <Terminal className="h-4 w-4 text-blue-500" />
+                        </Button>
                       )}
-                      <span className="ml-1">{extracting === doc.id ? 'Extracting...' : 'Extract'}</span>
-                    </Button>
-                    <Button size="sm" variant="ghost" asChild>
-                      <a href={doc.blob_url} target="_blank" rel="noreferrer">
-                        <Download className="h-4 w-4" />
-                      </a>
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="text-destructive hover:text-destructive"
-                      onClick={() => handleDelete(doc)}
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  </div>
-                </td>
-              </tr>
-            ))}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          setLlmProvider(doc.llm_provider || 'openai');
+                          setLlmModel(doc.llm_model || 'gpt-4o');
+                          setExtractModal(doc);
+                        }}
+                        disabled={isExtracting}
+                      >
+                        {isExtracting
+                          ? <><Loader2 className="h-4 w-4 animate-spin mr-1" /> Extracting...</>
+                          : <><Zap className="h-4 w-4 mr-1" /> Extract</>
+                        }
+                      </Button>
+                      <Button size="sm" variant="ghost" asChild>
+                        <a href={doc.blob_url} target="_blank" rel="noreferrer">
+                          <Download className="h-4 w-4" />
+                        </a>
+                      </Button>
+                      <Button
+                        size="sm" variant="ghost"
+                        className="text-destructive hover:text-destructive"
+                        onClick={() => handleDelete(doc)}
+                        disabled={isExtracting}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
+
+      {/* Live extraction log */}
+      {activeLog && (
+        <div className="rounded-lg border bg-gray-950 text-gray-100 text-xs font-mono overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-2 bg-gray-900 border-b border-gray-800">
+            <div className="flex items-center gap-2 text-gray-400">
+              <Terminal className="h-3.5 w-3.5" />
+              <span>Extraction log — {documents.find(d => d.id === activeLog.docId)?.filename}</span>
+            </div>
+            <button onClick={() => setActiveLog(null)} className="text-gray-500 hover:text-gray-300 text-lg leading-none">×</button>
+          </div>
+          <div className="p-4 space-y-1 max-h-72 overflow-y-auto">
+            {activeLog.entries.map((entry, i) => (
+              <div key={i} className={`flex gap-3 ${entry.type === 'error' ? 'text-red-400' : entry.type === 'done' ? 'text-green-400' : 'text-gray-300'}`}>
+                <span className="text-gray-600 shrink-0">{entry.time}</span>
+                <span>{entry.message}</span>
+              </div>
+            ))}
+            {extractingIds.has(activeLog.docId) && (
+              <div className="flex gap-3 text-yellow-400 animate-pulse">
+                <span className="text-gray-600 shrink-0">{now()}</span>
+                <span>⏳ Processing...</span>
+              </div>
+            )}
+            <div ref={logEndRef} />
+          </div>
+        </div>
+      )}
 
       <Dialog open={!!extractModal} onOpenChange={() => setExtractModal(null)}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Extract Transactions</DialogTitle>
             <DialogDescription>
-              Configure the LLM to use for extracting transactions from {extractModal?.filename}
+              Configure the LLM for extracting transactions from {extractModal?.filename}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
               <Label>LLM Provider</Label>
               <Select value={llmProvider} onValueChange={setLlmProvider}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
+                <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="anthropic">Anthropic (Claude)</SelectItem>
                   <SelectItem value="openai">OpenAI (GPT)</SelectItem>
+                  <SelectItem value="anthropic">Anthropic (Claude)</SelectItem>
                   <SelectItem value="google">Google (Gemini)</SelectItem>
                 </SelectContent>
               </Select>
             </div>
             <div className="space-y-2">
               <Label>Model</Label>
-              <Input
-                value={llmModel}
-                onChange={(e) => setLlmModel(e.target.value)}
-                placeholder="e.g. claude-sonnet-4-20250514"
-              />
+              <Input value={llmModel} onChange={(e) => setLlmModel(e.target.value)} placeholder="e.g. gpt-4o" />
             </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setExtractModal(null)}>Cancel</Button>
             <Button onClick={handleExtract}>
-              <Zap className="h-4 w-4 mr-2" />
-              Run Extraction
+              <Zap className="h-4 w-4 mr-2" /> Run Extraction
             </Button>
           </DialogFooter>
         </DialogContent>
