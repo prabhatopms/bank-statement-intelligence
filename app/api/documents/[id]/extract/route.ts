@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { auth } from '@clerk/nextjs/server';
 import { generateText } from 'ai';
+import { getDownloadUrl } from '@vercel/blob';
 import sql from '@/lib/db';
 import { decrypt } from '@/lib/encrypt';
 import { getLLMModel } from '@/lib/llm';
@@ -46,7 +47,8 @@ export async function POST(
       pdfPassword = decrypt(doc.password_hint);
     }
 
-    const pdfResponse = await fetch(doc.blob_url);
+    const downloadUrl = getDownloadUrl(doc.blob_url);
+    const pdfResponse = await fetch(downloadUrl);
     const pdfBuffer = Buffer.from(await pdfResponse.arrayBuffer());
     const extractedText = await extractTextFromPDF(pdfBuffer, pdfPassword);
 
