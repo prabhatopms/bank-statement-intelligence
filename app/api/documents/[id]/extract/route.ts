@@ -1,6 +1,6 @@
 import { NextRequest } from 'next/server';
 import { auth } from '@clerk/nextjs/server';
-import { generateText } from 'ai';
+import { streamText } from 'ai';
 import sql from '@/lib/db';
 import { decrypt } from '@/lib/encrypt';
 import { getLLMModel } from '@/lib/llm';
@@ -70,17 +70,6 @@ export async function POST(
     try { writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`)); } catch { /* stream closed */ }
   };
 
-  // Send SSE comment keepalives every 20s to prevent Vercel idle timeout (25s limit)
-  // and Cloudflare proxy timeout (100s). SSE comments (": ...") are ignored by clients.
-  let heartbeat: ReturnType<typeof setInterval> | null = null;
-  const startHeartbeat = () => {
-    heartbeat = setInterval(() => {
-      try { writer.write(encoder.encode(': keepalive\n\n')); } catch { stopHeartbeat(); }
-    }, 20000);
-  };
-  const stopHeartbeat = () => {
-    if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
-  };
 
   // Run extraction async, stream events as they happen
   (async () => {
@@ -157,8 +146,8 @@ export async function POST(
 
         let text = '';
         try {
-          startHeartbeat();
-          const result = await generateText({
+          // streamText keeps tokens flowing — no idle timeout, shows live char count
+          const { fullStream } = streamText({
             model,
             temperature: 0,
             maxTokens: 16000,
@@ -168,12 +157,24 @@ export async function POST(
               { role: 'user', content: `Extract all transactions from this bank statement text${chunks.length > 1 ? ` (part ${i + 1} of ${chunks.length})` : ''}. Return ONLY a raw JSON array.\n\n${chunks[i]}` },
             ],
           });
-          text = result.text;
+
+          let charCount = 0;
+          let lastUpdate = 0;
+          for await (const part of fullStream) {
+            if (abortSignal.aborted) break;
+            if (part.type === 'text-delta') {
+              text += part.textDelta;
+              charCount += part.textDelta.length;
+              // Send progress every 500 chars to show it's alive
+              if (charCount - lastUpdate >= 500) {
+                send({ type: 'log', message: `  ↳ receiving response... (${charCount.toLocaleString()} chars so far)` });
+                lastUpdate = charCount;
+              }
+            }
+          }
         } catch (e) {
           send({ type: 'log', message: `⚠️  Chunk ${i + 1} LLM error: ${e instanceof Error ? e.message : String(e)}` });
           continue;
-        } finally {
-          stopHeartbeat();
         }
 
         try {
@@ -242,7 +243,6 @@ export async function POST(
       } catch { /* ignore */ }
       send({ type: aborted ? 'aborted' : 'error', message: aborted ? 'Extraction was terminated.' : msg });
     } finally {
-      stopHeartbeat();
       try { writer.close(); } catch { /* already closed */ }
     }
   })();
