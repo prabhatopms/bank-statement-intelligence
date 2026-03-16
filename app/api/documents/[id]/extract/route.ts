@@ -83,31 +83,46 @@ RULES — follow all of them exactly:
 
 2. OUTPUT FORMAT: Return ONLY a valid raw JSON array. No markdown, no code fences, no explanation, no preamble, no trailing text.
 
-3. EACH OBJECT must have exactly these fields:
-   - "date": string in YYYY-MM-DD format. Infer year from statement context if not explicit.
-   - "description": string — full, untruncated narration/description as it appears.
+3. EACH OBJECT must have exactly these fields (use null for any field not present):
+   - "date": string YYYY-MM-DD — transaction/posting date.
+   - "value_date": string YYYY-MM-DD or null — value date if shown separately.
+   - "description": string — full, untruncated narration as it appears in the statement.
+   - "remarks": string or null — any secondary narration, note, or additional detail line.
    - "amount": positive number — always positive regardless of debit/credit.
    - "currency": string — e.g. "INR", "USD". Default to "INR" if not stated.
-   - "balance": number or null — running balance after transaction, null if not shown.
+   - "balance": number or null — closing/running balance after this transaction.
    - "type": "debit" or "credit" only.
+   - "mode": string or null — payment mode. Detect from narration: "UPI", "NEFT", "IMPS", "RTGS", "ATM", "POS", "CHEQUE", "DD", "NACH", "ECS", "SWIFT", "CASH", "WALLET", "EMI", "SI" (standing instruction). null if unclear.
+   - "transaction_id": string or null — bank's transaction reference ID, UTR number, RRN, or any system-generated ID found in narration.
+   - "reference_number": string or null — cheque number, DD number, or other instrument reference.
+   - "counterparty": string or null — name of sender (for credits) or receiver (for debits) if mentioned.
+   - "counterparty_account": string or null — account number of the other party if mentioned.
+   - "counterparty_bank": string or null — bank name of the other party if mentioned.
+   - "upi_id": string or null — UPI ID (e.g. name@bank) found in narration.
+   - "location": string or null — ATM location, POS merchant location, city if mentioned.
 
 4. TYPE DETECTION rules (apply in order):
    - If the statement has separate Dr/Cr columns, use whichever column has the value.
-   - Keywords implying DEBIT: withdrawal, debit, payment, purchase, transfer out, paid, POS, ATM, NEFT DR, IMPS DR, UPI DR, EMI, bill pay, charges, fee, tax.
-   - Keywords implying CREDIT: deposit, credit, received, salary, refund, reversal, cashback, interest credit, NEFT CR, IMPS CR, UPI CR, dividend.
+   - Keywords implying DEBIT: withdrawal, debit, payment, purchase, transfer out, paid, POS, ATM WDL, NEFT DR, IMPS DR, UPI DR, EMI, bill pay, charges, fee, tax, debit card.
+   - Keywords implying CREDIT: deposit, credit, received, salary, refund, reversal, cashback, interest credit, NEFT CR, IMPS CR, UPI CR, dividend, inward.
    - If balance decreases → debit. If balance increases → credit.
 
 5. DATE PARSING: Handle all formats — DD/MM/YYYY, MM/DD/YYYY, DD-Mon-YYYY (e.g. 14-Mar-2026), DD Mon YYYY, YYYY-MM-DD. Always output YYYY-MM-DD.
 
-6. AMOUNT PARSING: Remove commas, currency symbols (₹, $, £). Treat bracketed amounts like (1,234.56) as positive numbers.
+6. AMOUNT PARSING: Remove commas, currency symbols (₹, $, £, €). Treat bracketed amounts like (1,234.56) as positive numbers.
 
-7. DESCRIPTION: Keep the full narration. Do not shorten. Include reference numbers, UPI IDs, bank codes if present.
+7. DESCRIPTION: Keep the full narration. Do not shorten. Include reference numbers, UPI IDs, bank codes if present in the narration field.
 
-8. MULTI-PAGE / CONTINUED STATEMENTS: Process all pages as one continuous list. Do not restart numbering or skip carry-forward rows (opening balance, closing balance lines are NOT transactions — skip them).
+8. COUNTERPARTY EXTRACTION: Many narrations contain the other party's name. Examples:
+   - "UPI-JOHN DOE-john@upi-HDFC" → counterparty: "JOHN DOE", upi_id: "john@upi", counterparty_bank: "HDFC"
+   - "NEFT CR-AXIS BANK-JANE SMITH-UTR12345" → counterparty: "JANE SMITH", counterparty_bank: "AXIS BANK", transaction_id: "UTR12345"
+   - "ATM WDL SBI ATM MUMBAI" → mode: "ATM", location: "MUMBAI"
 
-9. NON-TRANSACTION LINES to skip: headers, footers, page numbers, account summaries, opening/closing balance rows, blank lines, column labels.
+9. MULTI-PAGE / CONTINUED STATEMENTS: Process all pages as one continuous list. Opening/closing balance summary rows are NOT transactions — skip them.
 
-10. VALIDATION: Before returning, mentally verify that the number of objects matches the number of transaction rows you identified. If in doubt, include the row.`;
+10. NON-TRANSACTION LINES to skip: headers, footers, page numbers, account summaries, opening/closing balance rows, blank lines, column labels, statement period lines.
+
+11. VALIDATION: Before returning, mentally count the transaction rows in the input and verify your array has the same count. If in doubt, include the row.`;
 
     // Chunk large statements to avoid token limits (process in 40k char windows)
     const CHUNK_SIZE = 40000;
@@ -118,11 +133,21 @@ RULES — follow all of them exactly:
 
     type RawTransaction = {
       date: string;
+      value_date?: string | null;
       description: string;
+      remarks?: string | null;
       amount: number;
       currency: string;
       balance: number | null;
       type: 'debit' | 'credit';
+      mode?: string | null;
+      transaction_id?: string | null;
+      reference_number?: string | null;
+      counterparty?: string | null;
+      counterparty_account?: string | null;
+      counterparty_bank?: string | null;
+      upi_id?: string | null;
+      location?: string | null;
     };
 
     const allTransactions: RawTransaction[] = [];
@@ -170,16 +195,31 @@ RULES — follow all of them exactly:
 
       try {
         const result = await sql`
-          INSERT INTO transactions (user_id, document_id, date, description, amount, currency, balance, type, fingerprint, flagged, flag_reason)
-          VALUES (
+          INSERT INTO transactions (
+            user_id, document_id, date, value_date, description, remarks,
+            amount, currency, balance, type, mode,
+            transaction_id, reference_number,
+            counterparty, counterparty_account, counterparty_bank,
+            upi_id, location, fingerprint, flagged, flag_reason
+          ) VALUES (
             ${userId},
             ${documentId},
             ${tx.date},
+            ${tx.value_date || null},
             ${tx.description},
+            ${tx.remarks || null},
             ${tx.amount},
             ${tx.currency || 'INR'},
-            ${tx.balance || null},
+            ${tx.balance ?? null},
             ${tx.type},
+            ${tx.mode || null},
+            ${tx.transaction_id || null},
+            ${tx.reference_number || null},
+            ${tx.counterparty || null},
+            ${tx.counterparty_account || null},
+            ${tx.counterparty_bank || null},
+            ${tx.upi_id || null},
+            ${tx.location || null},
             ${fingerprint},
             ${flagged},
             ${flagged ? 'Auto-flagged: suspicious keyword' : null}

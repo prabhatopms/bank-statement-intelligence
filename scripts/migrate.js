@@ -27,11 +27,21 @@ async function migrate() {
       user_id TEXT NOT NULL,
       document_id UUID REFERENCES documents(id) ON DELETE CASCADE,
       date DATE,
+      value_date DATE,
       description TEXT,
       amount NUMERIC(18,2),
       currency TEXT DEFAULT 'INR',
       balance NUMERIC(18,2),
       type TEXT CHECK (type IN ('debit','credit')),
+      mode TEXT,
+      transaction_id TEXT,
+      reference_number TEXT,
+      counterparty TEXT,
+      counterparty_account TEXT,
+      counterparty_bank TEXT,
+      upi_id TEXT,
+      remarks TEXT,
+      location TEXT,
       fingerprint TEXT NOT NULL,
       flagged BOOLEAN DEFAULT false,
       flag_reason TEXT,
@@ -45,6 +55,18 @@ async function migrate() {
       UNIQUE(user_id, fingerprint)
     )
   `;
+
+  // Add new columns to existing tables (idempotent)
+  await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS value_date DATE`;
+  await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS mode TEXT`;
+  await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS transaction_id TEXT`;
+  await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS reference_number TEXT`;
+  await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS counterparty TEXT`;
+  await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS counterparty_account TEXT`;
+  await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS counterparty_bank TEXT`;
+  await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS upi_id TEXT`;
+  await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS remarks TEXT`;
+  await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS location TEXT`;
 
   await sql`
     CREATE INDEX IF NOT EXISTS idx_documents_user_id ON documents(user_id)
