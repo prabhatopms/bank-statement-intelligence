@@ -19,7 +19,7 @@ export async function POST(request: NextRequest) {
         WHERE user_id = ${userId} AND enriched = false
         LIMIT 100
       `;
-      transactionIds = unenriched.map((t: { id: string }) => t.id);
+      transactionIds = (unenriched as { id: string }[]).map((t) => t.id);
     }
 
     if (!transactionIds || transactionIds.length === 0) {
