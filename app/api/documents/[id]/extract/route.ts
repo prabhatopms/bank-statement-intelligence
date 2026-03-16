@@ -1,10 +1,9 @@
 import { NextRequest } from 'next/server';
 import { auth } from '@clerk/nextjs/server';
-import { streamText } from 'ai';
 import sql from '@/lib/db';
 import { decrypt } from '@/lib/encrypt';
-import { getLLMModel } from '@/lib/llm';
-import { extractTextFromPDF } from '@/lib/pdf';
+import { extractTableRows } from '@/lib/table-extract';
+import { detectHeader, parseTransactions } from '@/lib/table-parse';
 import { computeFingerprint } from '@/lib/fingerprint';
 
 export const maxDuration = 300;
@@ -13,45 +12,8 @@ export const dynamic = 'force-dynamic';
 const FLAG_KEYWORDS = ['refund', 'failed', 'reversal', 'chargeback', 'dispute', 'unknown', 'error', 'hold'];
 function shouldFlag(d: string) { return FLAG_KEYWORDS.some(kw => d.toLowerCase().includes(kw)); }
 
-const SYSTEM_PROMPT = `You are a highly accurate bank statement parser. Your sole job is to extract EVERY transaction from bank statement text with zero omissions.
-
-RULES — follow all of them exactly:
-
-1. COMPLETENESS: Extract EVERY single transaction line. Do not skip, merge, summarise, or truncate. If a statement has 500 rows, return 500 objects.
-2. OUTPUT FORMAT: Return ONLY a valid raw JSON array. No markdown, no code fences, no explanation, no preamble, no trailing text.
-3. EACH OBJECT must have exactly these fields (use null if not present):
-   - "date": YYYY-MM-DD (transaction/posting date)
-   - "value_date": YYYY-MM-DD or null
-   - "description": full untruncated narration
-   - "remarks": secondary narration or null
-   - "amount": positive number always
-   - "currency": "INR" default
-   - "balance": running balance or null
-   - "type": "debit" or "credit"
-   - "mode": "UPI"|"NEFT"|"IMPS"|"RTGS"|"ATM"|"POS"|"CHEQUE"|"DD"|"NACH"|"ECS"|"SWIFT"|"CASH"|"WALLET"|"EMI"|"SI" or null
-   - "transaction_id": UTR/RRN/system ID or null
-   - "reference_number": cheque/DD number or null
-   - "counterparty": sender/receiver name or null
-   - "counterparty_account": account number or null
-   - "counterparty_bank": bank name or null
-   - "upi_id": UPI ID like name@bank or null
-   - "location": ATM/POS location or null
-4. TYPE DETECTION: Dr/Cr columns > keywords (debit/credit/withdrawal/deposit etc.) > balance direction
-5. DATE: handle DD/MM/YYYY, DD-Mon-YYYY, DD Mon YYYY → always YYYY-MM-DD
-6. COUNTERPARTY: "UPI-JOHN DOE-john@upi-HDFC" → counterparty:"JOHN DOE", upi_id:"john@upi", counterparty_bank:"HDFC"
-7. Skip: headers, footers, opening/closing balance rows, column labels.
-8. VALIDATION: count rows in input, verify output array matches.`;
-
-type RawTx = {
-  date: string; value_date?: string | null; description: string; remarks?: string | null;
-  amount: number; currency: string; balance: number | null; type: 'debit' | 'credit';
-  mode?: string | null; transaction_id?: string | null; reference_number?: string | null;
-  counterparty?: string | null; counterparty_account?: string | null; counterparty_bank?: string | null;
-  upi_id?: string | null; location?: string | null;
-};
-
 export async function POST(
-  request: NextRequest,
+  _request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   const { userId } = await auth();
@@ -61,165 +23,109 @@ export async function POST(
 
   const documentId = params.id;
   const encoder = new TextEncoder();
-  const abortSignal = request.signal;
-
   const stream = new TransformStream<Uint8Array, Uint8Array>();
   const writer = stream.writable.getWriter();
 
   const send = (data: object) => {
-    try { writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`)); } catch { /* stream closed */ }
+    try { writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`)); } catch { /* closed */ }
   };
 
-
-  // Run extraction async, stream events as they happen
   (async () => {
     try {
       const docs = await sql`SELECT * FROM documents WHERE id = ${documentId} AND user_id = ${userId}`;
       if (docs.length === 0) { send({ type: 'error', message: 'Document not found' }); return; }
       const doc = docs[0];
 
-      if (doc.status === 'extracting') {
-        send({ type: 'error', message: 'Extraction already in progress' }); return;
-      }
+      if (doc.status === 'extracting') { send({ type: 'error', message: 'Extraction already in progress' }); return; }
 
       await sql`UPDATE documents SET status = 'extracting', extracted_at = null WHERE id = ${documentId}`;
-      send({ type: 'log', message: '🔐 Decrypting document password...' });
 
+      // Decrypt password
       let pdfPassword: string | undefined;
       if (doc.password_hint) {
         try {
           pdfPassword = decrypt(doc.password_hint);
-          send({ type: 'log', message: '✓ Password decrypted successfully' });
+          send({ type: 'log', message: '🔐 Password decrypted' });
         } catch (e) {
           await sql`UPDATE documents SET status = 'failed' WHERE id = ${documentId}`;
           send({ type: 'error', message: `Password decryption failed: ${e instanceof Error ? e.message : String(e)}` });
           return;
         }
-      } else {
-        send({ type: 'log', message: '✓ No password required' });
       }
 
-      send({ type: 'log', message: `📥 Downloading PDF from storage...` });
+      // Download PDF
+      send({ type: 'log', message: '📥 Downloading PDF...' });
       const pdfResponse = await fetch(doc.blob_url);
       if (!pdfResponse.ok) {
         await sql`UPDATE documents SET status = 'failed' WHERE id = ${documentId}`;
-        send({ type: 'error', message: `Failed to download PDF: ${pdfResponse.status} ${pdfResponse.statusText}` });
+        send({ type: 'error', message: `Failed to download PDF: ${pdfResponse.status}` });
         return;
       }
       const pdfBuffer = Buffer.from(await pdfResponse.arrayBuffer());
       send({ type: 'log', message: `✓ PDF downloaded (${(pdfBuffer.length / 1024).toFixed(0)} KB)` });
 
-      send({ type: 'log', message: '📄 Parsing PDF text...' });
-      let extractedText: string;
+      // Extract table rows using coordinate-based parsing
+      send({ type: 'log', message: '📊 Extracting table structure from PDF...' });
+      let rows;
       try {
-        extractedText = await extractTextFromPDF(pdfBuffer, pdfPassword);
+        rows = await extractTableRows(pdfBuffer, pdfPassword);
       } catch (e) {
         await sql`UPDATE documents SET status = 'failed' WHERE id = ${documentId}`;
         const msg = e instanceof Error ? e.message : String(e);
-        send({ type: 'error', message: `PDF parsing failed: ${msg.toLowerCase().includes('password') ? msg + ' — check PDF password' : msg}` });
+        send({ type: 'error', message: `PDF parse failed: ${msg.toLowerCase().includes('password') ? msg + ' — check PDF password' : msg}` });
         return;
       }
 
-      if (!extractedText || extractedText.trim().length < 10) {
+      send({ type: 'log', message: `✓ Found ${rows.length} rows across all pages` });
+
+      // Detect header row and column mapping
+      send({ type: 'log', message: '🔍 Detecting column headers...' });
+      const headerResult = detectHeader(rows);
+
+      if (!headerResult) {
         await sql`UPDATE documents SET status = 'failed' WHERE id = ${documentId}`;
-        send({ type: 'error', message: 'PDF is empty or image-based (scanned). Only text-based PDFs are supported.' });
+        send({ type: 'error', message: 'Could not detect column headers (Date, Description, Debit/Credit, Balance). The PDF may use an unsupported format or be image-based.' });
         return;
       }
 
-      const charCount = extractedText.trim().length;
-      send({ type: 'log', message: `✓ Extracted ${charCount.toLocaleString()} characters of text` });
+      const { headerIndex, map } = headerResult;
+      const headerRow = rows[headerIndex];
+      send({ type: 'log', message: `✓ Headers found on row ${headerIndex + 1}: ${headerRow.cells.join(' | ')}` });
+      send({ type: 'log', message: `  Column map: ${Object.entries(map).map(([k,v]) => `${k}→col${(v as number)+1}`).join(', ')}` });
 
-      const CHUNK_SIZE = 40000;
-      const chunks: string[] = [];
-      for (let i = 0; i < extractedText.length; i += CHUNK_SIZE) {
-        chunks.push(extractedText.slice(i, i + CHUNK_SIZE));
-      }
-      send({ type: 'log', message: `📊 Split into ${chunks.length} chunk${chunks.length > 1 ? 's' : ''} for LLM processing` });
+      // Parse transactions from rows
+      send({ type: 'log', message: '⚙️  Parsing transaction rows...' });
+      const transactions = parseTransactions(rows, headerIndex, map);
+      send({ type: 'log', message: `✓ Parsed ${transactions.length} transaction rows` });
 
-      const provider = doc.llm_provider || 'openai';
-      const modelName = doc.llm_model || 'gpt-4o';
-      const model = getLLMModel(provider, modelName);
-      const allTransactions: RawTx[] = [];
-
-      for (let i = 0; i < chunks.length; i++) {
-        send({ type: 'log', message: `🤖 Calling ${provider}/${modelName} — chunk ${i + 1} of ${chunks.length} (~${Math.round(chunks[i].length / 4)} tokens)...` });
-
-        let text = '';
-        try {
-          // streamText keeps tokens flowing — no idle timeout, shows live char count
-          const { fullStream } = streamText({
-            model,
-            temperature: 0,
-            maxTokens: 16000,
-            abortSignal,
-            messages: [
-              { role: 'system', content: SYSTEM_PROMPT },
-              { role: 'user', content: `Extract all transactions from this bank statement text${chunks.length > 1 ? ` (part ${i + 1} of ${chunks.length})` : ''}. Return ONLY a raw JSON array.\n\n${chunks[i]}` },
-            ],
-          });
-
-          let charCount = 0;
-          let lastUpdate = 0;
-          for await (const part of fullStream) {
-            if (abortSignal.aborted) break;
-            if (part.type === 'text-delta') {
-              text += part.textDelta;
-              charCount += part.textDelta.length;
-              // Send progress every 500 chars to show it's alive
-              if (charCount - lastUpdate >= 500) {
-                send({ type: 'log', message: `  ↳ receiving response... (${charCount.toLocaleString()} chars so far)` });
-                lastUpdate = charCount;
-              }
-            }
-          }
-        } catch (e) {
-          send({ type: 'log', message: `⚠️  Chunk ${i + 1} LLM error: ${e instanceof Error ? e.message : String(e)}` });
-          continue;
-        }
-
-        try {
-          const cleaned = text.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
-          const parsed: RawTx[] = JSON.parse(cleaned);
-          if (Array.isArray(parsed)) {
-            allTransactions.push(...parsed);
-            send({ type: 'log', message: `✓ Chunk ${i + 1}: extracted ${parsed.length} transactions (running total: ${allTransactions.length})` });
-          }
-        } catch {
-          send({ type: 'log', message: `⚠️  Chunk ${i + 1}: could not parse LLM response (preview: ${text.substring(0, 80).replace(/\n/g, ' ')}...)` });
-        }
-      }
-
-      if (allTransactions.length === 0) {
+      if (transactions.length === 0) {
         await sql`UPDATE documents SET status = 'failed' WHERE id = ${documentId}`;
-        send({ type: 'error', message: 'No transactions could be extracted from this document.' });
+        send({ type: 'error', message: 'No transactions could be parsed. Headers were detected but no valid data rows found.' });
         return;
       }
 
-      send({ type: 'log', message: `💾 Saving ${allTransactions.length} transactions to database...` });
-
+      // Save to database
+      send({ type: 'log', message: `💾 Saving ${transactions.length} transactions to database...` });
       let inserted = 0;
       let skipped = 0;
 
-      for (const tx of allTransactions) {
-        if (!tx.date || !tx.description || tx.amount === undefined || !tx.type) continue;
+      for (const tx of transactions) {
         const fingerprint = computeFingerprint(userId, tx.date, tx.description, tx.amount, tx.type);
         const flagged = shouldFlag(tx.description);
         try {
           const result = await sql`
             INSERT INTO transactions (
-              user_id, document_id, date, value_date, description, remarks,
-              amount, currency, balance, type, mode,
-              transaction_id, reference_number,
-              counterparty, counterparty_account, counterparty_bank,
-              upi_id, location, fingerprint, flagged, flag_reason
+              user_id, document_id, date, value_date, description,
+              amount, currency, balance, type,
+              reference_number, mode,
+              fingerprint, flagged, flag_reason
             ) VALUES (
-              ${userId}, ${documentId}, ${tx.date}, ${tx.value_date || null},
-              ${tx.description}, ${tx.remarks || null}, ${tx.amount},
-              ${tx.currency || 'INR'}, ${tx.balance ?? null}, ${tx.type},
-              ${tx.mode || null}, ${tx.transaction_id || null}, ${tx.reference_number || null},
-              ${tx.counterparty || null}, ${tx.counterparty_account || null},
-              ${tx.counterparty_bank || null}, ${tx.upi_id || null}, ${tx.location || null},
-              ${fingerprint}, ${flagged}, ${flagged ? 'Auto-flagged: suspicious keyword' : null}
+              ${userId}, ${documentId}, ${tx.date}, ${tx.value_date},
+              ${tx.description}, ${tx.amount}, ${tx.currency},
+              ${tx.balance}, ${tx.type},
+              ${tx.reference_number}, ${tx.mode},
+              ${fingerprint}, ${flagged},
+              ${flagged ? 'Auto-flagged: suspicious keyword' : null}
             )
             ON CONFLICT (user_id, fingerprint) DO NOTHING
             RETURNING id
@@ -232,18 +138,15 @@ export async function POST(
       }
 
       await sql`UPDATE documents SET status = 'extracted', extracted_at = now() WHERE id = ${documentId}`;
+      send({ type: 'done', inserted, skipped, total: transactions.length });
 
-      send({ type: 'done', inserted, skipped, total: allTransactions.length });
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      const aborted = abortSignal.aborted || msg.toLowerCase().includes('abort');
       console.error('Extraction error:', msg);
-      try {
-        await sql`UPDATE documents SET status = ${aborted ? 'uploaded' : 'failed'} WHERE id = ${documentId}`;
-      } catch { /* ignore */ }
-      send({ type: aborted ? 'aborted' : 'error', message: aborted ? 'Extraction was terminated.' : msg });
+      try { await sql`UPDATE documents SET status = 'failed' WHERE id = ${documentId}`; } catch { /**/ }
+      send({ type: 'error', message: msg });
     } finally {
-      try { writer.close(); } catch { /* already closed */ }
+      try { writer.close(); } catch { /**/ }
     }
   })();
 

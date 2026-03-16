@@ -1,7 +1,8 @@
 "use client"
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { FileText, Trash2, Download, Zap, Clock, CheckCircle, XCircle, Loader2, Terminal, StopCircle } from 'lucide-react';
+import { FileText, Trash2, Download, Zap, Clock, CheckCircle, XCircle, Loader2, Terminal, StopCircle, Eye } from 'lucide-react';
+import { TablePreview } from '@/components/TablePreview';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
@@ -51,6 +52,7 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
 
   // logs[docId] = array of entries — persists across open/close
   const [logs, setLogs] = useState<Record<string, LogEntry[]>>({});
+  const [previewDoc, setPreviewDoc] = useState<Document | null>(null);
   // which doc's log panel is currently visible
   const [visibleLog, setVisibleLog] = useState<string | null>(null);
   // which docs are actively streaming
@@ -229,6 +231,16 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
                         </Button>
                       )}
 
+                      {/* Preview table */}
+                      <Button
+                        size="sm" variant="ghost"
+                        onClick={() => setPreviewDoc(doc)}
+                        title="Preview extracted table"
+                        className="text-muted-foreground hover:text-blue-600"
+                      >
+                        <Eye className="h-4 w-4" />
+                      </Button>
+
                       {/* Terminate — only while extracting */}
                       {isExtracting && (
                         <Button
@@ -322,6 +334,15 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
             <div ref={logEndRef} />
           </div>
         </div>
+      )}
+
+      {previewDoc && (
+        <TablePreview
+          documentId={previewDoc.id}
+          filename={previewDoc.filename}
+          open={!!previewDoc}
+          onClose={() => setPreviewDoc(null)}
+        />
       )}
 
       <Dialog open={!!extractModal} onOpenChange={() => setExtractModal(null)}>
