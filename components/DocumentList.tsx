@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { FileText, Trash2, Download, Zap, Clock, CheckCircle, XCircle, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -32,45 +32,77 @@ interface DocumentListProps {
   onRefresh: () => void;
 }
 
-function StatusBadge({ status }: { status: string }) {
-  const variants: Record<string, { variant: 'default' | 'secondary' | 'destructive' | 'outline' | 'success' | 'warning'; icon: React.ReactNode }> = {
-    uploaded: { variant: 'secondary', icon: <Clock className="h-3 w-3" /> },
-    extracting: { variant: 'warning', icon: <Loader2 className="h-3 w-3 animate-spin" /> },
-    extracted: { variant: 'success', icon: <CheckCircle className="h-3 w-3" /> },
-    failed: { variant: 'destructive', icon: <XCircle className="h-3 w-3" /> },
+function StatusBadge({ status, elapsedSec }: { status: string; elapsedSec?: number }) {
+  const map: Record<string, { cls: string; icon: React.ReactNode }> = {
+    uploaded:   { cls: 'bg-gray-100 text-gray-700',   icon: <Clock className="h-3 w-3" /> },
+    extracting: { cls: 'bg-yellow-100 text-yellow-800', icon: <Loader2 className="h-3 w-3 animate-spin" /> },
+    extracted:  { cls: 'bg-green-100 text-green-800',  icon: <CheckCircle className="h-3 w-3" /> },
+    failed:     { cls: 'bg-red-100 text-red-700',      icon: <XCircle className="h-3 w-3" /> },
   };
-  const { variant, icon } = variants[status] || variants.uploaded;
+  const { cls, icon } = map[status] || map.uploaded;
+  const timeStr = status === 'extracting' && elapsedSec ? ` ${elapsedSec}s` : '';
   return (
-    <Badge variant={variant} className="flex items-center gap-1">
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${cls}`}>
       {icon}
-      {status}
-    </Badge>
+      {status}{timeStr}
+    </span>
   );
 }
 
 export function DocumentList({ documents, onRefresh }: DocumentListProps) {
   const [extracting, setExtracting] = useState<string | null>(null);
   const [extractModal, setExtractModal] = useState<Document | null>(null);
-  const [llmProvider, setLlmProvider] = useState('anthropic');
-  const [llmModel, setLlmModel] = useState('claude-sonnet-4-20250514');
+  const [llmProvider, setLlmProvider] = useState('openai');
+  const [llmModel, setLlmModel] = useState('gpt-4o');
+  const [elapsed, setElapsed] = useState<Record<string, number>>({});
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const { toast } = useToast();
+
+  const extractingDocs = documents.filter(d => d.status === 'extracting');
+
+  // Poll every 3s while any document is extracting
+  useEffect(() => {
+    if (extractingDocs.length > 0) {
+      if (!pollRef.current) {
+        pollRef.current = setInterval(() => { onRefresh(); }, 3000);
+      }
+      if (!timerRef.current) {
+        timerRef.current = setInterval(() => {
+          setElapsed(prev => {
+            const next = { ...prev };
+            extractingDocs.forEach(d => { next[d.id] = (next[d.id] || 0) + 1; });
+            return next;
+          });
+        }, 1000);
+      }
+    } else {
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+    }
+    return () => {
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [extractingDocs.length]);
 
   const handleExtract = async () => {
     if (!extractModal) return;
-    setExtracting(extractModal.id);
+    const docId = extractModal.id;
+    setExtracting(docId);
+    setElapsed(prev => ({ ...prev, [docId]: 0 }));
     setExtractModal(null);
 
     try {
-      const res = await fetch(`/api/documents/${extractModal.id}/extract`, {
-        method: 'POST',
-      });
-      const data: ExtractionResult & { error?: string } = await res.json();
-
-      if (!res.ok) throw new Error(data.error || 'Extraction failed');
-
+      const res = await fetch(`/api/documents/${docId}/extract`, { method: 'POST' });
+      const data = await res.json();
+      if (res.status === 401) throw new Error('Unauthorized');
+      if (res.status === 404) throw new Error('Document not found');
+      // 202 = started in background, UI will poll for completion
       toast({
-        title: 'Extraction complete',
-        description: `✓ ${data.inserted} new transactions · ⊘ ${data.skipped} duplicates skipped`,
+        title: 'Extraction started',
+        description: 'Running in background — the status will update automatically.',
       });
       onRefresh();
     } catch (error) {
@@ -79,7 +111,6 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
         description: error instanceof Error ? error.message : 'Unknown error',
         variant: 'destructive',
       });
-    } finally {
       setExtracting(null);
     }
   };
@@ -132,7 +163,7 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
                   {new Date(doc.uploaded_at).toLocaleDateString()}
                 </td>
                 <td className="p-4">
-                  <StatusBadge status={doc.status} />
+                  <StatusBadge status={doc.status} elapsedSec={elapsed[doc.id]} />
                 </td>
                 <td className="p-4 text-muted-foreground text-xs">
                   <span className="font-mono">{doc.llm_provider}/{doc.llm_model}</span>
