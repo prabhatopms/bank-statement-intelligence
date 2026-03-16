@@ -8,6 +8,7 @@ import { extractTextFromPDF } from '@/lib/pdf';
 import { computeFingerprint } from '@/lib/fingerprint';
 
 export const maxDuration = 300;
+export const dynamic = 'force-dynamic';
 
 const FLAG_KEYWORDS = ['refund', 'failed', 'reversal', 'chargeback', 'dispute', 'unknown', 'error', 'hold'];
 function shouldFlag(d: string) { return FLAG_KEYWORDS.some(kw => d.toLowerCase().includes(kw)); }
@@ -66,9 +67,19 @@ export async function POST(
   const writer = stream.writable.getWriter();
 
   const send = (data: object) => {
-    try {
-      writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
-    } catch { /* stream closed */ }
+    try { writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`)); } catch { /* stream closed */ }
+  };
+
+  // Send SSE comment keepalives every 20s to prevent Vercel idle timeout (25s limit)
+  // and Cloudflare proxy timeout (100s). SSE comments (": ...") are ignored by clients.
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
+  const startHeartbeat = () => {
+    heartbeat = setInterval(() => {
+      try { writer.write(encoder.encode(': keepalive\n\n')); } catch { stopHeartbeat(); }
+    }, 20000);
+  };
+  const stopHeartbeat = () => {
+    if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
   };
 
   // Run extraction async, stream events as they happen
@@ -146,6 +157,7 @@ export async function POST(
 
         let text = '';
         try {
+          startHeartbeat();
           const result = await generateText({
             model,
             temperature: 0,
@@ -160,6 +172,8 @@ export async function POST(
         } catch (e) {
           send({ type: 'log', message: `⚠️  Chunk ${i + 1} LLM error: ${e instanceof Error ? e.message : String(e)}` });
           continue;
+        } finally {
+          stopHeartbeat();
         }
 
         try {
@@ -228,14 +242,16 @@ export async function POST(
       } catch { /* ignore */ }
       send({ type: aborted ? 'aborted' : 'error', message: aborted ? 'Extraction was terminated.' : msg });
     } finally {
+      stopHeartbeat();
       try { writer.close(); } catch { /* already closed */ }
     }
   })();
 
   return new Response(stream.readable, {
     headers: {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache, no-transform',
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-store, no-transform',
+      'Connection': 'keep-alive',
       'X-Accel-Buffering': 'no',
     },
   });
