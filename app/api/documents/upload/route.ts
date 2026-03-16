@@ -26,8 +26,7 @@ export async function POST(request: NextRequest) {
     }
 
     const filename = `${userId}/${Date.now()}-${file.name}`;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const blob = await (put as any)(filename, file, {});
+    const blob = await put(filename, file, { access: 'public' });
 
     const encryptedPassword = password ? encrypt(password) : null;
 
