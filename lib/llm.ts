@@ -11,6 +11,6 @@ export function getLLMModel(provider: string, model: string) {
     case 'google':
       return google(model || 'gemini-1.5-pro');
     default:
-      return anthropic(model || 'claude-sonnet-4-20250514');
+      return openai(model || 'gpt-4o');
   }
 }

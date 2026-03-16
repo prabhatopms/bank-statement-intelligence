@@ -32,7 +32,7 @@ export async function POST(request: NextRequest) {
 
     const result = await sql`
       INSERT INTO documents (user_id, filename, blob_url, password_hint, llm_provider, llm_model)
-      VALUES (${userId}, ${file.name}, ${blob.url}, ${encryptedPassword}, ${llmProvider || 'anthropic'}, ${llmModel || 'claude-sonnet-4-20250514'})
+      VALUES (${userId}, ${file.name}, ${blob.url}, ${encryptedPassword}, ${llmProvider || 'openai'}, ${llmModel || 'gpt-4o'})
       RETURNING *
     `;
 

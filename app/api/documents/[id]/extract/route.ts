@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { auth } from '@clerk/nextjs/server';
 import { generateText } from 'ai';
-import { getDownloadUrl } from '@vercel/blob';
 import sql from '@/lib/db';
 import { decrypt } from '@/lib/encrypt';
 import { getLLMModel } from '@/lib/llm';
@@ -47,8 +46,7 @@ export async function POST(
       pdfPassword = decrypt(doc.password_hint);
     }
 
-    const downloadUrl = getDownloadUrl(doc.blob_url);
-    const pdfResponse = await fetch(downloadUrl);
+    const pdfResponse = await fetch(doc.blob_url);
     const pdfBuffer = Buffer.from(await pdfResponse.arrayBuffer());
     const extractedText = await extractTextFromPDF(pdfBuffer, pdfPassword);
 
@@ -132,8 +130,9 @@ ${extractedText.substring(0, 50000)}`,
       total: transactions.length,
     });
   } catch (error) {
-    console.error('Extraction error:', error);
-    await sql`UPDATE documents SET status = 'failed' WHERE id = ${(await Promise.resolve(params)).id}`;
-    return NextResponse.json({ error: 'Extraction failed' }, { status: 500 });
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('Extraction error:', message);
+    await sql`UPDATE documents SET status = 'failed' WHERE id = ${params.id}`;
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
