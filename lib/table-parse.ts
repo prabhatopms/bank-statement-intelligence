@@ -25,14 +25,14 @@ export interface ParsedTransaction {
 
 // Header keyword patterns covering SBI, ICICI, HDFC, Axis, Kotak, Yes Bank etc.
 const PATTERNS: Record<keyof ColumnMap, RegExp> = {
-  date:        /^(date|txn\s*date|tran\s*date|trans\.?\s*date|posting\s*date|transaction\s*date)$/i,
+  date:        /^(date|txn\s*date|tran\s*date|trans\.?\s*date|posting\s*date|transaction\s*date|s\.?\s*no\.?)$/i,
   value_date:  /^(value\s*date|val\.?\s*date|effective\s*date)$/i,
-  description: /^(description|narration|particulars|remarks|transaction\s*details?|details?|memo|narrative|trans\.?\s*remarks|trans\.?\s*particular|tran\s*description)$/i,
-  debit:       /^(debit|dr\.?|withdrawal[s]?|dr\s*amount|debit\s*amount|debit\s*\(dr\)|withdrawl[s]?)$/i,
-  credit:      /^(credit|cr\.?|deposit[s]?|cr\s*amount|credit\s*amount|credit\s*\(cr\))$/i,
-  balance:     /^(balance|closing\s*balance|running\s*balance|avl\.?\s*bal(?:ance)?|avail(?:able)?\s*bal(?:ance)?|bal\.?)$/i,
-  reference:   /^(ref(?:erence)?\.?\s*no\.?|cheque?\s*no\.?|chq\.?\s*no\.?|utr|trans(?:action)?\s*id|instrument\s*no\.?)$/i,
-  mode:        /^(mode|trans(?:action)?\s*type|type|channel)$/i,
+  description: /^(description|narration|particulars|remarks|transaction\s*details?|details?|memo|narrative|trans\.?\s*remarks|trans\.?\s*particular|tran\s*description|transaction\s*remarks?)$/i,
+  debit:       /^(debit|dr\.?|withdrawal[s]?\s*(\(dr\.?\))?|dr\s*amount|debit\s*amount|debit\s*\(dr\.?\)|withdrawl[s]?|debit\s*\(inr\)|dr\s*\(inr\))$/i,
+  credit:      /^(credit|cr\.?|deposit[s]?\s*(\(cr\.?\))?|cr\s*amount|credit\s*amount|credit\s*\(cr\.?\)|deposit\s*\(inr\)|cr\s*\(inr\))$/i,
+  balance:     /^(balance|closing\s*balance|running\s*balance|avl\.?\s*bal(?:ance)?|avail(?:able)?\s*bal(?:ance)?|bal\.?|outstanding\s*balance|balance\s*\(inr\))$/i,
+  reference:   /^(ref(?:erence)?\.?\s*no\.?|cheque?\s*no\.?|chq\.?\s*no\.?|utr|trans(?:action)?\s*id|instrument\s*no\.?|tran\s*id|ref\s*id)$/i,
+  mode:        /^(mode|trans(?:action)?\s*type|type|channel|transaction\s*type)$/i,
 };
 
 // Detect header row within first 30 rows, return column index map

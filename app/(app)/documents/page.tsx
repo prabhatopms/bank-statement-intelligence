@@ -5,7 +5,6 @@ import { Upload, FileText, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { DocumentList } from '@/components/DocumentList';
 import { Toaster } from '@/components/ui/toaster';
 import { useToast } from '@/hooks/use-toast';
@@ -14,8 +13,6 @@ interface Document {
   id: string;
   filename: string;
   blob_url: string;
-  llm_provider: string;
-  llm_model: string;
   status: string;
   uploaded_at: string;
   extracted_at?: string;
@@ -26,8 +23,6 @@ export default function DocumentsPage() {
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [password, setPassword] = useState('');
-  const [llmProvider, setLlmProvider] = useState('openai');
-  const [llmModel, setLlmModel] = useState('gpt-4o');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
 
@@ -54,8 +49,6 @@ export default function DocumentsPage() {
     const formData = new FormData();
     formData.append('file', file);
     formData.append('password', password);
-    formData.append('llmProvider', llmProvider);
-    formData.append('llmModel', llmModel);
 
     try {
       const res = await fetch('/api/documents/upload', { method: 'POST', body: formData });
@@ -73,18 +66,12 @@ export default function DocumentsPage() {
     }
   };
 
-  const defaultModels: Record<string, string> = {
-    anthropic: 'claude-sonnet-4-20250514',
-    openai: 'gpt-4o',
-    google: 'gemini-1.5-pro',
-  };
-
   return (
     <div className="space-y-8">
       <Toaster />
       <div>
         <h1 className="text-2xl font-bold">Documents</h1>
-        <p className="text-muted-foreground mt-1">Upload bank statements for AI-powered transaction extraction</p>
+        <p className="text-muted-foreground mt-1">Upload bank statements — transactions are extracted automatically using coordinate-based PDF parsing</p>
       </div>
 
       <div className="bg-white rounded-lg border p-6">
@@ -108,28 +95,6 @@ export default function DocumentsPage() {
                 placeholder="Leave empty if not password-protected"
               />
               <p className="text-xs text-muted-foreground">Stored encrypted (AES-256)</p>
-            </div>
-            <div className="space-y-2">
-              <Label>LLM Provider</Label>
-              <Select value={llmProvider} onValueChange={(v) => { setLlmProvider(v); setLlmModel(defaultModels[v] || ''); }}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="anthropic">Anthropic (Claude)</SelectItem>
-                  <SelectItem value="openai">OpenAI (GPT)</SelectItem>
-                  <SelectItem value="google">Google (Gemini)</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="model">Model</Label>
-              <Input
-                id="model"
-                value={llmModel}
-                onChange={(e) => setLlmModel(e.target.value)}
-                placeholder="e.g. claude-sonnet-4-20250514"
-              />
             </div>
           </div>
           <Button type="submit" disabled={uploading}>

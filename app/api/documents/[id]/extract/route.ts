@@ -83,8 +83,11 @@ export async function POST(
       const headerResult = detectHeader(rows);
 
       if (!headerResult) {
+        // Log first 10 rows to help diagnose format
+        const sample = rows.slice(0, 10).map((r, i) => `  Row ${i+1}: [${r.cells.join(' | ')}]`).join('\n');
+        send({ type: 'log', message: `First 10 rows sample:\n${sample}` });
         await sql`UPDATE documents SET status = 'failed' WHERE id = ${documentId}`;
-        send({ type: 'error', message: 'Could not detect column headers (Date, Description, Debit/Credit, Balance). The PDF may use an unsupported format or be image-based.' });
+        send({ type: 'error', message: 'Could not detect column headers. Check Preview (👁) to see raw rows and identify the header format.' });
         return;
       }
 

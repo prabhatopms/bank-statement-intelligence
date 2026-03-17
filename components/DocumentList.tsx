@@ -5,17 +5,12 @@ import { FileText, Trash2, Download, Zap, Clock, CheckCircle, XCircle, Loader2, 
 import { TablePreview } from '@/components/TablePreview';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
 
 interface Document {
   id: string;
   filename: string;
   blob_url: string;
-  llm_provider: string;
-  llm_model: string;
   status: string;
   uploaded_at: string;
   extracted_at?: string;
@@ -47,8 +42,6 @@ const ts = () => new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minut
 
 export function DocumentList({ documents, onRefresh }: DocumentListProps) {
   const [extractModal, setExtractModal] = useState<Document | null>(null);
-  const [llmProvider, setLlmProvider] = useState('openai');
-  const [llmModel, setLlmModel] = useState('gpt-4o');
 
   // logs[docId] = array of entries — persists across open/close
   const [logs, setLogs] = useState<Record<string, LogEntry[]>>({});
@@ -214,9 +207,6 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
                   <td className="p-4">
                     <StatusBadge status={isExtracting ? 'extracting' : doc.status} />
                   </td>
-                  <td className="p-4 text-muted-foreground text-xs font-mono">
-                    {doc.llm_provider}/{doc.llm_model}
-                  </td>
                   <td className="p-4">
                     <div className="flex items-center justify-end gap-1">
                       {/* Log toggle — shown if there's any log for this doc */}
@@ -255,11 +245,7 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
 
                       <Button
                         size="sm" variant="outline"
-                        onClick={() => {
-                          setLlmProvider(doc.llm_provider || 'openai');
-                          setLlmModel(doc.llm_model || 'gpt-4o');
-                          setExtractModal(doc);
-                        }}
+                        onClick={() => setExtractModal(doc)}
                         disabled={isExtracting}
                       >
                         {isExtracting
@@ -349,25 +335,10 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Extract Transactions</DialogTitle>
-            <DialogDescription>Configure the LLM for {extractModal?.filename}</DialogDescription>
+            <DialogDescription>
+              Extract all transactions from <strong>{extractModal?.filename}</strong> using coordinate-based PDF table parsing. No AI or network calls — fast and deterministic.
+            </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label>LLM Provider</Label>
-              <Select value={llmProvider} onValueChange={setLlmProvider}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="openai">OpenAI (GPT)</SelectItem>
-                  <SelectItem value="anthropic">Anthropic (Claude)</SelectItem>
-                  <SelectItem value="google">Google (Gemini)</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <Label>Model</Label>
-              <Input value={llmModel} onChange={e => setLlmModel(e.target.value)} placeholder="e.g. gpt-4o" />
-            </div>
-          </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setExtractModal(null)}>Cancel</Button>
             <Button onClick={handleExtract}><Zap className="h-4 w-4 mr-2" />Run Extraction</Button>
