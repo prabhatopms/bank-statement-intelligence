@@ -35,9 +35,9 @@ const PATTERNS: Record<keyof ColumnMap, RegExp> = {
   mode:        /^(mode|trans(?:action)?\s*type|type|channel|transaction\s*type)$/i,
 };
 
-// Detect header row within first 30 rows, return column index map
+// Detect header row by scanning all rows (headers can appear after many pages of metadata)
 export function detectHeader(rows: TableRow[]): { headerIndex: number; map: ColumnMap } | null {
-  for (let i = 0; i < Math.min(rows.length, 30); i++) {
+  for (let i = 0; i < rows.length; i++) {
     const cells = rows[i].cells;
     const map: ColumnMap = {};
     let score = 0;
@@ -54,12 +54,12 @@ export function detectHeader(rows: TableRow[]): { headerIndex: number; map: Colu
       }
     }
 
-    // Need at least: date + (debit or credit) + description OR date + balance
+    // Need at least: date + one of (debit, credit, balance, description)
     const hasMinFields =
       map.date !== undefined &&
-      (map.debit !== undefined || map.credit !== undefined || map.balance !== undefined);
+      (map.debit !== undefined || map.credit !== undefined || map.balance !== undefined || map.description !== undefined);
 
-    if (score >= 3 && hasMinFields) {
+    if (score >= 2 && hasMinFields) {
       return { headerIndex: i, map };
     }
   }

@@ -83,8 +83,12 @@ export async function POST(
       const headerResult = detectHeader(rows);
 
       if (!headerResult) {
-        // Log first 10 rows to help diagnose format
-        const sample = rows.slice(0, 10).map((r, i) => `  Row ${i+1}: [${r.cells.join(' | ')}]`).join('\n');
+        // Log a sample from different parts of the document
+        const sampleRows = [
+          ...rows.slice(0, 5),
+          ...rows.slice(Math.floor(rows.length / 4), Math.floor(rows.length / 4) + 5),
+        ];
+        const sample = sampleRows.map((r, i) => `  Row ${i+1}: [${r.cells.join(' | ')}]`).join('\n');
         send({ type: 'log', message: `First 10 rows sample:\n${sample}` });
         await sql`UPDATE documents SET status = 'failed' WHERE id = ${documentId}`;
         send({ type: 'error', message: 'Could not detect column headers. Check Preview (👁) to see raw rows and identify the header format.' });
