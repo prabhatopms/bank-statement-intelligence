@@ -136,33 +136,60 @@ async function runOpenAIMode(pdfBuffer: Buffer, password: string | undefined, _u
 
 // --- Mode: Gemini 2.5 Flash (native PDF, best accuracy) ---
 async function runGeminiMode(pdfBuffer: Buffer, _userId: string, _documentId: string, send: (d: object) => void) {
-  send({ type: 'log', message: '🔮 Sending PDF to Gemini 2.5 Flash (native PDF mode)...' });
-  const base64 = pdfBuffer.toString('base64');
-  let fullText = '';
-  const { fullStream } = streamText({
-    model: google('gemini-2.5-flash-preview-04-17'),
-    temperature: 0,
-    maxTokens: 65536,
-    messages: [{
-      role: 'user',
-      content: [
-        { type: 'file', data: base64, mimeType: 'application/pdf' } as { type: 'file'; data: string; mimeType: string },
-        { type: 'text', text: `${EXTRACTION_SYSTEM_PROMPT}\n\nExtract ALL transactions from this bank statement PDF. Return ONLY a raw JSON array.` },
-      ],
-    }],
-  });
-  for await (const chunk of fullStream) {
-    if (chunk.type === 'text-delta') {
-      fullText += chunk.textDelta;
-      // Show live token count every ~2000 chars
-      if (fullText.length % 2000 < 50) send({ type: 'log', message: `  ⏳ Receiving... (~${fullText.length.toLocaleString()} chars so far)` });
+  // Try models in order — 2.0-flash is fast + supports PDF natively; 1.5-pro as reliable fallback
+  const MODELS = ['gemini-2.0-flash', 'gemini-1.5-pro'];
+
+  for (const modelId of MODELS) {
+    send({ type: 'log', message: `🔮 Sending PDF to Gemini (${modelId}, native PDF mode)...` });
+    const base64 = pdfBuffer.toString('base64');
+    let fullText = '';
+    let lastReport = 0;
+
+    try {
+      const { fullStream } = streamText({
+        model: google(modelId),
+        temperature: 0,
+        maxTokens: 65536,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'file', data: base64, mimeType: 'application/pdf' } as { type: 'file'; data: string; mimeType: string },
+            { type: 'text', text: `${EXTRACTION_SYSTEM_PROMPT}\n\nExtract ALL transactions from this bank statement PDF. Return ONLY a raw JSON array.` },
+          ],
+        }],
+      });
+
+      for await (const chunk of fullStream) {
+        if (chunk.type === 'text-delta') {
+          fullText += chunk.textDelta;
+          if (fullText.length - lastReport > 3000) {
+            send({ type: 'log', message: `  ⏳ Receiving... (~${fullText.length.toLocaleString()} chars)` });
+            lastReport = fullText.length;
+          }
+        } else if (chunk.type === 'error') {
+          throw new Error(String((chunk as { error: unknown }).error));
+        }
+      }
+
+      if (fullText.length === 0) {
+        send({ type: 'log', message: `  ⚠ ${modelId} returned empty response, trying next model...` });
+        continue;
+      }
+
+      send({ type: 'log', message: `✓ Gemini response: ${fullText.length.toLocaleString()} chars` });
+      const parsed = JSON.parse(cleanJson(fullText));
+      if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('Gemini returned no transactions.');
+      send({ type: 'log', message: `✓ ${parsed.length} transactions extracted by Gemini` });
+      return parsed as RawTx[];
+
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      send({ type: 'log', message: `  ⚠ ${modelId} failed: ${msg}` });
+      if (modelId === MODELS[MODELS.length - 1]) throw new Error(`All Gemini models failed. Last error: ${msg}`);
     }
   }
-  send({ type: 'log', message: `✓ Gemini response: ${fullText.length.toLocaleString()} chars` });
-  const parsed = JSON.parse(cleanJson(fullText));
-  if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('Gemini returned no transactions.');
-  send({ type: 'log', message: `✓ Parsed ${parsed.length} transactions from Gemini` });
-  return parsed as RawTx[];
+
+  throw new Error('Gemini extraction failed.');
 }
 
 // --- Mode: Claude (native PDF) ---
