@@ -149,6 +149,19 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
     }
   };
 
+  const handleClearTransactions = async (doc: Document) => {
+    if (!confirm(`Clear all extracted transactions from "${doc.filename}"? The document will stay but status resets to uploaded.`)) return;
+    try {
+      const res = await fetch(`/api/documents/${doc.id}/transactions`, { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed');
+      toast({ title: 'Transactions cleared', description: `${data.deleted} transactions deleted` });
+      onRefresh();
+    } catch {
+      toast({ title: 'Failed to clear transactions', variant: 'destructive' });
+    }
+  };
+
   const handleDelete = async (doc: Document) => {
     if (!confirm(`Delete "${doc.filename}"? This will also delete all extracted transactions.`)) return;
     try {
@@ -259,6 +272,18 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
                           <Download className="h-4 w-4" />
                         </a>
                       </Button>
+
+                      {doc.status === 'extracted' && (
+                        <Button
+                          size="sm" variant="ghost"
+                          className="text-orange-500 hover:text-orange-600"
+                          onClick={() => handleClearTransactions(doc)}
+                          disabled={isExtracting}
+                          title="Clear extracted transactions"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      )}
 
                       <Button
                         size="sm" variant="ghost"
