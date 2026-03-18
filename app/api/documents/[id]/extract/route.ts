@@ -1,10 +1,15 @@
 import { NextRequest } from 'next/server';
 import { auth } from '@clerk/nextjs/server';
+import { streamText } from 'ai';
+import { openai } from '@ai-sdk/openai';
+import { google } from '@ai-sdk/google';
+import { anthropic } from '@ai-sdk/anthropic';
 import sql from '@/lib/db';
 import { decrypt } from '@/lib/encrypt';
 import { extractTableRows } from '@/lib/table-extract';
 import { detectHeader, parseTransactions } from '@/lib/table-parse';
 import { computeFingerprint } from '@/lib/fingerprint';
+import pdfParse from 'pdf-parse';
 
 export const maxDuration = 300;
 export const dynamic = 'force-dynamic';
@@ -12,138 +17,222 @@ export const dynamic = 'force-dynamic';
 const FLAG_KEYWORDS = ['refund', 'failed', 'reversal', 'chargeback', 'dispute', 'unknown', 'error', 'hold'];
 function shouldFlag(d: string) { return FLAG_KEYWORDS.some(kw => d.toLowerCase().includes(kw)); }
 
-export async function POST(
-  _request: NextRequest,
-  { params }: { params: { id: string } }
-) {
-  const { userId } = await auth();
-  if (!userId) {
-    return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 });
+const EXTRACTION_SYSTEM_PROMPT = `You are a highly accurate bank statement parser. Extract EVERY transaction with zero omissions.
+
+OUTPUT: Return ONLY a valid raw JSON array. No markdown, no code fences, no explanation.
+
+EACH OBJECT must have exactly:
+- "date": "YYYY-MM-DD" — infer year from context if missing
+- "description": full narration as-is, untruncated
+- "amount": positive number, always positive
+- "currency": "INR" (default) or as stated
+- "balance": running balance after transaction, or null
+- "type": "debit" or "credit" only
+
+TYPE DETECTION (apply in order):
+1. Separate Dr/Cr columns → use whichever has a value
+2. Keywords → debit: withdrawal, payment, purchase, paid, ATM, NEFT DR, IMPS DR, UPI DR, EMI, charges, fee
+             → credit: deposit, received, salary, refund, reversal, cashback, interest, NEFT CR, IMPS CR, UPI CR
+3. Balance direction → decreased = debit, increased = credit
+
+DATE FORMATS: Handle DD/MM/YYYY, DD-Mon-YYYY (14-Mar-2026), DD Mon YYYY, YYYY-MM-DD. Always output YYYY-MM-DD.
+
+AMOUNT: Remove commas, ₹, $. Bracketed (1,234.56) = positive number.
+
+SKIP: headers, footers, page numbers, opening/closing balance summary rows, blank lines.
+
+COMPLETENESS: If statement has 200 rows, return 200 objects. Do not merge, skip, or truncate.`;
+
+type RawTx = { date: string; description: string; amount: number; currency?: string; balance?: number | null; type: 'debit' | 'credit' };
+
+async function saveTransactions(
+  userId: string, documentId: string,
+  transactions: RawTx[],
+  send: (d: object) => void
+): Promise<{ inserted: number; skipped: number }> {
+  let inserted = 0, skipped = 0;
+  send({ type: 'log', message: `💾 Saving ${transactions.length} transactions to database...` });
+  for (const tx of transactions) {
+    if (!tx.date || !tx.description || tx.amount === undefined || !tx.type) { skipped++; continue; }
+    const fp = computeFingerprint(userId, tx.date, tx.description, tx.amount, tx.type);
+    const flagged = shouldFlag(tx.description);
+    try {
+      const r = await sql`
+        INSERT INTO transactions (user_id, document_id, date, description, amount, currency, balance, type, fingerprint, flagged, flag_reason)
+        VALUES (${userId}, ${documentId}, ${tx.date}, ${tx.description}, ${tx.amount}, ${tx.currency || 'INR'}, ${tx.balance ?? null}, ${tx.type}, ${fp}, ${flagged}, ${flagged ? 'Auto-flagged: suspicious keyword' : null})
+        ON CONFLICT (user_id, fingerprint) DO NOTHING RETURNING id`;
+      r.length > 0 ? inserted++ : skipped++;
+    } catch { skipped++; }
+  }
+  return { inserted, skipped };
+}
+
+function cleanJson(text: string): string {
+  return text.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+}
+
+// --- Mode: coordinate-based PDF parser (no LLM) ---
+async function runAutoMode(pdfBuffer: Buffer, password: string | undefined, _userId: string, _documentId: string, send: (d: object) => void) {
+  send({ type: 'log', message: '📊 Extracting table structure from PDF...' });
+  const rows = await extractTableRows(pdfBuffer, password);
+  send({ type: 'log', message: `✓ Found ${rows.length} rows across all pages` });
+
+  send({ type: 'log', message: '🔍 Detecting column headers...' });
+  const headerResult = detectHeader(rows);
+  if (!headerResult) {
+    const sample = [...rows.slice(0, 5), ...rows.slice(Math.floor(rows.length / 4), Math.floor(rows.length / 4) + 5)]
+      .map((r, i) => `Row ${i + 1}: [${r.cells.join(' | ')}]`).join('\n');
+    send({ type: 'log', message: `Sample rows:\n${sample}` });
+    throw new Error('Could not detect column headers. Try GPT-4o or Gemini mode instead.');
   }
 
+  const { headerIndex, xmap } = headerResult;
+  send({ type: 'log', message: `✓ Headers on row ${headerIndex + 1}: ${rows[headerIndex].cells.join(' | ')}` });
+  send({ type: 'log', message: `  Columns: ${Object.entries(xmap).map(([k, v]) => `${k}→x${Math.round(v as number)}`).join(', ')}` });
+
+  send({ type: 'log', message: '⚙️  Parsing rows...' });
+  const transactions = parseTransactions(rows, headerIndex, xmap);
+  send({ type: 'log', message: `✓ Parsed ${transactions.length} transactions` });
+  if (transactions.length === 0) throw new Error('No transactions parsed. Try GPT-4o or Gemini mode.');
+  return transactions as RawTx[];
+}
+
+// --- Mode: GPT-4o (text extraction → LLM) ---
+async function runOpenAIMode(pdfBuffer: Buffer, password: string | undefined, _userId: string, _documentId: string, send: (d: object) => void) {
+  send({ type: 'log', message: '📄 Extracting text from PDF...' });
+  const parsed = await pdfParse(pdfBuffer, password ? { password } as object : undefined);
+  const text = parsed.text;
+  send({ type: 'log', message: `✓ Extracted ${text.length.toLocaleString()} characters` });
+
+  const CHUNK = 80000;
+  const chunks = [];
+  for (let i = 0; i < text.length; i += CHUNK) chunks.push(text.slice(i, i + CHUNK));
+  send({ type: 'log', message: `📦 Processing ${chunks.length} chunk(s) with GPT-4o...` });
+
+  const all: RawTx[] = [];
+  for (let i = 0; i < chunks.length; i++) {
+    send({ type: 'log', message: `🤖 GPT-4o — chunk ${i + 1}/${chunks.length}...` });
+    let fullText = '';
+    const { fullStream } = streamText({
+      model: openai('gpt-4o'),
+      temperature: 0,
+      maxTokens: 16000,
+      messages: [
+        { role: 'system', content: EXTRACTION_SYSTEM_PROMPT },
+        { role: 'user', content: `Extract all transactions from this bank statement${chunks.length > 1 ? ` (part ${i + 1}/${chunks.length})` : ''}. Return ONLY raw JSON array.\n\n${chunks[i]}` },
+      ],
+    });
+    for await (const chunk of fullStream) {
+      if (chunk.type === 'text-delta') fullText += chunk.textDelta;
+    }
+    try {
+      const parsed = JSON.parse(cleanJson(fullText));
+      if (Array.isArray(parsed)) { all.push(...parsed); send({ type: 'log', message: `  ✓ Chunk ${i + 1}: ${parsed.length} transactions` }); }
+    } catch { send({ type: 'log', message: `  ⚠ Chunk ${i + 1} parse failed, skipping` }); }
+  }
+  if (all.length === 0) throw new Error('GPT-4o returned no transactions.');
+  return all;
+}
+
+// --- Mode: Gemini 2.5 Flash (native PDF, best accuracy) ---
+async function runGeminiMode(pdfBuffer: Buffer, _userId: string, _documentId: string, send: (d: object) => void) {
+  send({ type: 'log', message: '🔮 Sending PDF to Gemini 2.5 Flash (native PDF mode)...' });
+  const base64 = pdfBuffer.toString('base64');
+  let fullText = '';
+  const { fullStream } = streamText({
+    model: google('gemini-2.5-flash-preview-04-17'),
+    temperature: 0,
+    maxTokens: 65536,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'file', data: base64, mimeType: 'application/pdf' } as { type: 'file'; data: string; mimeType: string },
+        { type: 'text', text: `${EXTRACTION_SYSTEM_PROMPT}\n\nExtract ALL transactions from this bank statement PDF. Return ONLY a raw JSON array.` },
+      ],
+    }],
+  });
+  for await (const chunk of fullStream) {
+    if (chunk.type === 'text-delta') {
+      fullText += chunk.textDelta;
+      // Show live token count every ~2000 chars
+      if (fullText.length % 2000 < 50) send({ type: 'log', message: `  ⏳ Receiving... (~${fullText.length.toLocaleString()} chars so far)` });
+    }
+  }
+  send({ type: 'log', message: `✓ Gemini response: ${fullText.length.toLocaleString()} chars` });
+  const parsed = JSON.parse(cleanJson(fullText));
+  if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('Gemini returned no transactions.');
+  send({ type: 'log', message: `✓ Parsed ${parsed.length} transactions from Gemini` });
+  return parsed as RawTx[];
+}
+
+// --- Mode: Claude (native PDF) ---
+async function runClaudeMode(pdfBuffer: Buffer, _userId: string, _documentId: string, send: (d: object) => void) {
+  send({ type: 'log', message: '🧠 Sending PDF to Claude (native PDF mode)...' });
+  const base64 = pdfBuffer.toString('base64');
+  let fullText = '';
+  const { fullStream } = streamText({
+    model: anthropic('claude-sonnet-4-5'),
+    temperature: 0,
+    maxTokens: 16000,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'file', data: base64, mimeType: 'application/pdf' } as { type: 'file'; data: string; mimeType: string },
+        { type: 'text', text: `${EXTRACTION_SYSTEM_PROMPT}\n\nExtract ALL transactions from this bank statement PDF. Return ONLY a raw JSON array.` },
+      ],
+    }],
+  });
+  for await (const chunk of fullStream) {
+    if (chunk.type === 'text-delta') fullText += chunk.textDelta;
+  }
+  send({ type: 'log', message: `✓ Claude response: ${fullText.length.toLocaleString()} chars` });
+  const parsed = JSON.parse(cleanJson(fullText));
+  if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('Claude returned no transactions.');
+  send({ type: 'log', message: `✓ Parsed ${parsed.length} transactions from Claude` });
+  return parsed as RawTx[];
+}
+
+export async function POST(request: NextRequest, { params }: { params: { id: string } }) {
+  const { userId } = await auth();
+  if (!userId) return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 });
+
   const documentId = params.id;
+  const url = new URL(request.url);
+  const mode = url.searchParams.get('mode') || 'auto'; // auto | openai | gemini | claude
+
   const encoder = new TextEncoder();
   const stream = new TransformStream<Uint8Array, Uint8Array>();
   const writer = stream.writable.getWriter();
-
-  const send = (data: object) => {
-    try { writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`)); } catch { /* closed */ }
-  };
+  const send = (data: object) => { try { writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`)); } catch { /**/ } };
 
   (async () => {
     try {
       const docs = await sql`SELECT * FROM documents WHERE id = ${documentId} AND user_id = ${userId}`;
       if (docs.length === 0) { send({ type: 'error', message: 'Document not found' }); return; }
       const doc = docs[0];
-
       if (doc.status === 'extracting') { send({ type: 'error', message: 'Extraction already in progress' }); return; }
 
       await sql`UPDATE documents SET status = 'extracting', extracted_at = null WHERE id = ${documentId}`;
 
-      // Decrypt password
       let pdfPassword: string | undefined;
       if (doc.password_hint) {
-        try {
-          pdfPassword = decrypt(doc.password_hint);
-          send({ type: 'log', message: '🔐 Password decrypted' });
-        } catch (e) {
-          await sql`UPDATE documents SET status = 'failed' WHERE id = ${documentId}`;
-          send({ type: 'error', message: `Password decryption failed: ${e instanceof Error ? e.message : String(e)}` });
-          return;
-        }
+        try { pdfPassword = decrypt(doc.password_hint); send({ type: 'log', message: '🔐 Password decrypted' }); }
+        catch (e) { throw new Error(`Password decryption failed: ${e instanceof Error ? e.message : e}`); }
       }
 
-      // Download PDF
-      send({ type: 'log', message: '📥 Downloading PDF...' });
+      send({ type: 'log', message: `📥 Downloading PDF... [mode: ${mode}]` });
       const pdfResponse = await fetch(doc.blob_url);
-      if (!pdfResponse.ok) {
-        await sql`UPDATE documents SET status = 'failed' WHERE id = ${documentId}`;
-        send({ type: 'error', message: `Failed to download PDF: ${pdfResponse.status}` });
-        return;
-      }
+      if (!pdfResponse.ok) throw new Error(`Failed to download PDF: ${pdfResponse.status}`);
       const pdfBuffer = Buffer.from(await pdfResponse.arrayBuffer());
       send({ type: 'log', message: `✓ PDF downloaded (${(pdfBuffer.length / 1024).toFixed(0)} KB)` });
 
-      // Extract table rows using coordinate-based parsing
-      send({ type: 'log', message: '📊 Extracting table structure from PDF...' });
-      let rows;
-      try {
-        rows = await extractTableRows(pdfBuffer, pdfPassword);
-      } catch (e) {
-        await sql`UPDATE documents SET status = 'failed' WHERE id = ${documentId}`;
-        const msg = e instanceof Error ? e.message : String(e);
-        send({ type: 'error', message: `PDF parse failed: ${msg.toLowerCase().includes('password') ? msg + ' — check PDF password' : msg}` });
-        return;
-      }
+      let transactions: RawTx[];
+      if (mode === 'openai')      transactions = await runOpenAIMode(pdfBuffer, pdfPassword, userId, documentId, send);
+      else if (mode === 'gemini') transactions = await runGeminiMode(pdfBuffer, userId, documentId, send);
+      else if (mode === 'claude') transactions = await runClaudeMode(pdfBuffer, userId, documentId, send);
+      else                        transactions = await runAutoMode(pdfBuffer, pdfPassword, userId, documentId, send);
 
-      send({ type: 'log', message: `✓ Found ${rows.length} rows across all pages` });
-
-      // Detect header row and column mapping
-      send({ type: 'log', message: '🔍 Detecting column headers...' });
-      const headerResult = detectHeader(rows);
-
-      if (!headerResult) {
-        // Log a sample from different parts of the document
-        const sampleRows = [
-          ...rows.slice(0, 5),
-          ...rows.slice(Math.floor(rows.length / 4), Math.floor(rows.length / 4) + 5),
-        ];
-        const sample = sampleRows.map((r, i) => `  Row ${i+1}: [${r.cells.join(' | ')}]`).join('\n');
-        send({ type: 'log', message: `First 10 rows sample:\n${sample}` });
-        await sql`UPDATE documents SET status = 'failed' WHERE id = ${documentId}`;
-        send({ type: 'error', message: 'Could not detect column headers. Check Preview (👁) to see raw rows and identify the header format.' });
-        return;
-      }
-
-      const { headerIndex, xmap } = headerResult;
-      const headerRow = rows[headerIndex];
-      send({ type: 'log', message: `✓ Headers found on row ${headerIndex + 1}: ${headerRow.cells.join(' | ')}` });
-      send({ type: 'log', message: `  Column map: ${Object.entries(xmap).map(([k,v]) => `${k}→x${Math.round(v as number)}`).join(', ')}` });
-
-      // Parse transactions from rows
-      send({ type: 'log', message: '⚙️  Parsing transaction rows...' });
-      const transactions = parseTransactions(rows, headerIndex, xmap);
-      send({ type: 'log', message: `✓ Parsed ${transactions.length} transaction rows` });
-
-      if (transactions.length === 0) {
-        await sql`UPDATE documents SET status = 'failed' WHERE id = ${documentId}`;
-        send({ type: 'error', message: 'No transactions could be parsed. Headers were detected but no valid data rows found.' });
-        return;
-      }
-
-      // Save to database
-      send({ type: 'log', message: `💾 Saving ${transactions.length} transactions to database...` });
-      let inserted = 0;
-      let skipped = 0;
-
-      for (const tx of transactions) {
-        const fingerprint = computeFingerprint(userId, tx.date, tx.description, tx.amount, tx.type);
-        const flagged = shouldFlag(tx.description);
-        try {
-          const result = await sql`
-            INSERT INTO transactions (
-              user_id, document_id, date, value_date, description,
-              amount, currency, balance, type,
-              reference_number, mode,
-              fingerprint, flagged, flag_reason
-            ) VALUES (
-              ${userId}, ${documentId}, ${tx.date}, ${tx.value_date},
-              ${tx.description}, ${tx.amount}, ${tx.currency},
-              ${tx.balance}, ${tx.type},
-              ${tx.reference_number}, ${tx.mode},
-              ${fingerprint}, ${flagged},
-              ${flagged ? 'Auto-flagged: suspicious keyword' : null}
-            )
-            ON CONFLICT (user_id, fingerprint) DO NOTHING
-            RETURNING id
-          `;
-          result.length > 0 ? inserted++ : skipped++;
-        } catch (e) {
-          console.error('Insert error:', e);
-          skipped++;
-        }
-      }
-
+      const { inserted, skipped } = await saveTransactions(userId, documentId, transactions, send);
       await sql`UPDATE documents SET status = 'extracted', extracted_at = now() WHERE id = ${documentId}`;
       send({ type: 'done', inserted, skipped, total: transactions.length });
 

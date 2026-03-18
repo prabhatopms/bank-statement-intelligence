@@ -42,6 +42,7 @@ const ts = () => new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minut
 
 export function DocumentList({ documents, onRefresh }: DocumentListProps) {
   const [extractModal, setExtractModal] = useState<Document | null>(null);
+  const [extractMode, setExtractMode] = useState<'auto' | 'openai' | 'gemini' | 'claude'>('gemini');
 
   // logs[docId] = array of entries — persists across open/close
   const [logs, setLogs] = useState<Record<string, LogEntry[]>>({});
@@ -77,7 +78,7 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
     setExtractingIds(prev => new Set(prev).add(doc.id));
 
     try {
-      const res = await fetch(`/api/documents/${doc.id}/extract`, {
+      const res = await fetch(`/api/documents/${doc.id}/extract?mode=${extractMode}`, {
         method: 'POST',
         signal: controller.signal,
       });
@@ -332,13 +333,40 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
       )}
 
       <Dialog open={!!extractModal} onOpenChange={() => setExtractModal(null)}>
-        <DialogContent>
+        <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>Extract Transactions</DialogTitle>
-            <DialogDescription>
-              Extract all transactions from <strong>{extractModal?.filename}</strong> using coordinate-based PDF table parsing. No AI or network calls — fast and deterministic.
-            </DialogDescription>
+            <DialogDescription>Choose extraction engine for <strong>{extractModal?.filename}</strong></DialogDescription>
           </DialogHeader>
+          <div className="grid grid-cols-1 gap-2 py-2">
+            {([
+              { id: 'gemini',  label: '🔮 Gemini 2.5 Flash', sub: 'Best accuracy · Native PDF · Handles scanned PDFs · ~$0.001/doc', badge: 'Recommended' },
+              { id: 'openai',  label: '🤖 GPT-4o',            sub: 'Great accuracy · Text extraction → LLM · ~$0.02/doc', badge: '' },
+              { id: 'claude',  label: '🧠 Claude Sonnet',     sub: 'Excellent accuracy · Native PDF · ~$0.025/doc', badge: '' },
+              { id: 'auto',    label: '⚡ PDF Parser',         sub: 'Free · Instant · No AI · May fail on complex layouts', badge: 'Free' },
+            ] as const).map(opt => (
+              <button
+                key={opt.id}
+                onClick={() => setExtractMode(opt.id)}
+                className={`flex items-start gap-3 p-3 rounded-lg border-2 text-left transition-all ${
+                  extractMode === opt.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'
+                }`}
+              >
+                <div className={`mt-0.5 h-4 w-4 rounded-full border-2 flex-shrink-0 flex items-center justify-center ${
+                  extractMode === opt.id ? 'border-blue-500' : 'border-gray-300'
+                }`}>
+                  {extractMode === opt.id && <div className="h-2 w-2 rounded-full bg-blue-500" />}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-sm">{opt.label}</span>
+                    {opt.badge && <span className="text-[10px] bg-green-100 text-green-700 px-1.5 py-0.5 rounded font-medium">{opt.badge}</span>}
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-0.5">{opt.sub}</p>
+                </div>
+              </button>
+            ))}
+          </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setExtractModal(null)}>Cancel</Button>
             <Button onClick={handleExtract}><Zap className="h-4 w-4 mr-2" />Run Extraction</Button>
