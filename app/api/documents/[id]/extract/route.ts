@@ -138,64 +138,103 @@ async function runGeminiMode(pdfBuffer: Buffer, _userId: string, _documentId: st
   const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
   if (!apiKey) throw new Error('GOOGLE_GENERATIVE_AI_API_KEY is not set.');
 
-  // Models in priority order — use direct REST API to avoid SDK model-alias issues
-  const MODELS = [
-    'gemini-2.5-flash-preview-04-17',
-    'gemini-2.5-pro-preview-03-25',
+  const BASE = 'https://generativelanguage.googleapis.com';
+
+  // Hardcoded fallback order — newest stable first
+  const FALLBACK_MODELS = [
+    'gemini-2.0-flash',
     'gemini-2.0-flash-lite',
+    'gemini-1.5-flash',
+    'gemini-1.5-pro',
+    'gemini-1.5-flash-8b',
   ];
 
+  // Step 1: discover which models are actually available for this API key
+  send({ type: 'log', message: '🔍 Discovering available Gemini models...' });
+  let availableModel: string | null = null;
+
+  try {
+    const listRes = await fetch(`${BASE}/v1beta/models?key=${apiKey}&pageSize=50`);
+    if (!listRes.ok) {
+      const errBody = await listRes.json().catch(() => ({}));
+      send({ type: 'log', message: `  ⚠ ListModels HTTP ${listRes.status}: ${(errBody as { error?: { message?: string } })?.error?.message ?? listRes.statusText}` });
+    } else {
+      const listData = await listRes.json();
+      const models: { name: string; supportedGenerationMethods?: string[] }[] = listData.models ?? [];
+
+      const PREFERRED = ['flash', 'pro'];
+      const candidates = models
+        .filter(m => m.supportedGenerationMethods?.includes('generateContent'))
+        .map(m => m.name.replace('models/', ''))
+        .filter(id => !id.includes('embedding') && !id.includes('aqa'));
+
+      send({ type: 'log', message: `  Found ${candidates.length} models with generateContent support` });
+      if (candidates.length > 0) send({ type: 'log', message: `  Available: ${candidates.slice(0, 8).join(', ')}${candidates.length > 8 ? '...' : ''}` });
+
+      for (const tier of ['2.5', '2.0', '1.5']) {
+        for (const type of PREFERRED) {
+          const match = candidates.find(id => id.includes(tier) && id.includes(type));
+          if (match) { availableModel = match; break; }
+        }
+        if (availableModel) break;
+      }
+      if (!availableModel && candidates.length > 0) availableModel = candidates[0];
+    }
+  } catch (e) {
+    send({ type: 'log', message: `  ⚠ ListModels failed: ${e instanceof Error ? e.message : e}` });
+  }
+
+  // Fall back to hardcoded list if discovery failed or returned nothing
+  if (!availableModel) {
+    send({ type: 'log', message: `  ℹ Discovery returned nothing — trying hardcoded fallback list` });
+    availableModel = FALLBACK_MODELS[0];
+  }
+  send({ type: 'log', message: `🔮 Using model: ${availableModel}` });
+
+  // Step 2: call generateContent — try selected model, then fallbacks
   const base64 = pdfBuffer.toString('base64');
   const prompt = `${EXTRACTION_SYSTEM_PROMPT}\n\nExtract ALL transactions from this bank statement PDF. Return ONLY a raw JSON array.`;
 
-  for (const modelId of MODELS) {
-    send({ type: 'log', message: `🔮 Trying Gemini model: ${modelId}...` });
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{
-            parts: [
-              { inlineData: { mimeType: 'application/pdf', data: base64 } },
-              { text: prompt },
-            ],
-          }],
-          generationConfig: { temperature: 0, maxOutputTokens: 65536 },
-        }),
-      });
+  const modelsToTry = [availableModel, ...FALLBACK_MODELS.filter(m => m !== availableModel)];
 
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: { message: res.statusText } }));
-        const msg = err?.error?.message || res.statusText;
-        send({ type: 'log', message: `  ⚠ ${modelId} API error: ${msg}` });
-        continue;
-      }
+  for (const modelId of modelsToTry) {
+    send({ type: 'log', message: `🔮 Trying model: ${modelId}` });
+    const res = await fetch(`${BASE}/v1beta/models/${modelId}:generateContent?key=${apiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [
+          { inlineData: { mimeType: 'application/pdf', data: base64 } },
+          { text: prompt },
+        ]}],
+        generationConfig: { temperature: 0, maxOutputTokens: 65536 },
+      }),
+    });
 
-      const data = await res.json();
-      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-
-      if (!text) {
-        const reason = data?.candidates?.[0]?.finishReason ?? 'unknown';
-        send({ type: 'log', message: `  ⚠ ${modelId} returned empty (finishReason: ${reason}), trying next...` });
-        continue;
-      }
-
-      send({ type: 'log', message: `✓ Gemini response: ${text.length.toLocaleString()} chars` });
-      const parsed = JSON.parse(cleanJson(text));
-      if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('Gemini returned no transactions.');
-      send({ type: 'log', message: `✓ ${parsed.length} transactions extracted by ${modelId}` });
-      return parsed as RawTx[];
-
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      send({ type: 'log', message: `  ⚠ ${modelId} failed: ${msg}` });
-      if (modelId === MODELS[MODELS.length - 1]) throw new Error(`All Gemini models failed. Last: ${msg}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      const msg = (err as { error?: { message?: string } })?.error?.message ?? res.statusText;
+      send({ type: 'log', message: `  ✗ ${modelId} failed (${res.status}): ${msg}` });
+      continue;
     }
+
+    const data = await res.json();
+    const text: string = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    const finishReason: string = data?.candidates?.[0]?.finishReason ?? '';
+
+    if (!text) {
+      send({ type: 'log', message: `  ✗ ${modelId} returned empty (finishReason: ${finishReason || 'unknown'})` });
+      continue;
+    }
+
+    send({ type: 'log', message: `✓ ${modelId} responded (${text.length.toLocaleString()} chars)` });
+    const parsed = JSON.parse(cleanJson(text));
+    if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('Gemini returned no transactions.');
+    send({ type: 'log', message: `✓ ${parsed.length} transactions extracted` });
+    return parsed as RawTx[];
   }
 
-  throw new Error('Gemini extraction failed.');
+  throw new Error(`All Gemini models failed. Check your GOOGLE_GENERATIVE_AI_API_KEY and API quota.`);
 }
 
 // --- Mode: Claude (native PDF) ---
