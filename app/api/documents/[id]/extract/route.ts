@@ -70,6 +70,51 @@ function cleanJson(text: string): string {
   return text.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
 }
 
+// Robust JSON array parser — handles truncated output by extracting all complete objects.
+// Returns [objects, wasPartial].
+function parseJsonArray(text: string): [RawTx[], boolean] {
+  const s = cleanJson(text);
+  // Fast path: valid complete JSON
+  try {
+    const r = JSON.parse(s);
+    if (Array.isArray(r)) return [r, false];
+  } catch { /* fall through to partial extraction */ }
+
+  // Partial path: walk through and extract each complete {...} object
+  const results: RawTx[] = [];
+  let i = 0;
+  while (i < s.length && s[i] !== '[') i++;
+  i++; // skip '['
+
+  while (i < s.length) {
+    while (i < s.length && (s[i] === ',' || s[i] === ' ' || s[i] === '\n' || s[i] === '\r' || s[i] === '\t')) i++;
+    if (i >= s.length || s[i] === ']') break;
+    if (s[i] !== '{') { i++; continue; }
+
+    // Scan for matching closing brace
+    let depth = 0, j = i, inStr = false, esc = false;
+    while (j < s.length) {
+      const c = s[j];
+      if (esc)          { esc = false; j++; continue; }
+      if (c === '\\' && inStr) { esc = true; j++; continue; }
+      if (c === '"')    { inStr = !inStr; j++; continue; }
+      if (inStr)        { j++; continue; }
+      if (c === '{')    depth++;
+      else if (c === '}') { depth--; if (depth === 0) { j++; break; } }
+      j++;
+    }
+
+    if (depth === 0) {
+      try { results.push(JSON.parse(s.slice(i, j))); } catch { /* skip malformed object */ }
+      i = j;
+    } else {
+      break; // truncated — stop here
+    }
+  }
+
+  return [results, true]; // partial
+}
+
 // --- Mode: coordinate-based PDF parser (no LLM) ---
 async function runAutoMode(pdfBuffer: Buffer, password: string | undefined, _userId: string, _documentId: string, send: (d: object) => void) {
   send({ type: 'log', message: '📊 Extracting table structure from PDF...' });
@@ -124,10 +169,9 @@ async function runOpenAIMode(pdfBuffer: Buffer, password: string | undefined, _u
     for await (const chunk of fullStream) {
       if (chunk.type === 'text-delta') fullText += chunk.textDelta;
     }
-    try {
-      const parsed = JSON.parse(cleanJson(fullText));
-      if (Array.isArray(parsed)) { all.push(...parsed); send({ type: 'log', message: `  ✓ Chunk ${i + 1}: ${parsed.length} transactions` }); }
-    } catch { send({ type: 'log', message: `  ⚠ Chunk ${i + 1} parse failed, skipping` }); }
+    const [chunkTxs, chunkPartial] = parseJsonArray(fullText);
+    if (chunkTxs.length > 0) { all.push(...chunkTxs); send({ type: 'log', message: `  ✓ Chunk ${i + 1}: ${chunkTxs.length} transactions${chunkPartial ? ' (partial recovery)' : ''}` }); }
+    else { send({ type: 'log', message: `  ⚠ Chunk ${i + 1} parse failed, skipping` }); }
   }
   if (all.length === 0) throw new Error('GPT-4o returned no transactions.');
   return all;
@@ -228,8 +272,9 @@ async function runGeminiMode(pdfBuffer: Buffer, _userId: string, _documentId: st
     }
 
     send({ type: 'log', message: `✓ ${modelId} responded (${text.length.toLocaleString()} chars)` });
-    const parsed = JSON.parse(cleanJson(text));
-    if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('Gemini returned no transactions.');
+    const [parsed, wasPartial] = parseJsonArray(text);
+    if (parsed.length === 0) { send({ type: 'log', message: `  ✗ ${modelId}: could not parse any transactions` }); continue; }
+    if (wasPartial) send({ type: 'log', message: `  ⚠ Response was truncated — recovered ${parsed.length} transactions from partial JSON` });
     send({ type: 'log', message: `✓ ${parsed.length} transactions extracted` });
     return parsed as RawTx[];
   }
@@ -258,8 +303,9 @@ async function runClaudeMode(pdfBuffer: Buffer, _userId: string, _documentId: st
     if (chunk.type === 'text-delta') fullText += chunk.textDelta;
   }
   send({ type: 'log', message: `✓ Claude response: ${fullText.length.toLocaleString()} chars` });
-  const parsed = JSON.parse(cleanJson(fullText));
-  if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('Claude returned no transactions.');
+  const [parsed, wasPartial] = parseJsonArray(fullText);
+  if (parsed.length === 0) throw new Error('Claude returned no transactions.');
+  if (wasPartial) send({ type: 'log', message: `  ⚠ Response was truncated — recovered ${parsed.length} transactions from partial JSON` });
   send({ type: 'log', message: `✓ Parsed ${parsed.length} transactions from Claude` });
   return parsed as RawTx[];
 }
