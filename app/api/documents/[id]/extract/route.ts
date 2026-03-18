@@ -2,7 +2,6 @@ import { NextRequest } from 'next/server';
 import { auth } from '@clerk/nextjs/server';
 import { streamText } from 'ai';
 import { openai } from '@ai-sdk/openai';
-import { google } from '@ai-sdk/google';
 import { anthropic } from '@ai-sdk/anthropic';
 import sql from '@/lib/db';
 import { decrypt } from '@/lib/encrypt';
@@ -136,56 +135,63 @@ async function runOpenAIMode(pdfBuffer: Buffer, password: string | undefined, _u
 
 // --- Mode: Gemini 2.5 Flash (native PDF, best accuracy) ---
 async function runGeminiMode(pdfBuffer: Buffer, _userId: string, _documentId: string, send: (d: object) => void) {
-  // Try models in order — 2.0-flash is fast + supports PDF natively; 1.5-pro as reliable fallback
-  const MODELS = ['gemini-2.0-flash', 'gemini-1.5-pro'];
+  const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+  if (!apiKey) throw new Error('GOOGLE_GENERATIVE_AI_API_KEY is not set.');
+
+  // Models in priority order — use direct REST API to avoid SDK model-alias issues
+  const MODELS = [
+    'gemini-2.5-flash-preview-04-17',
+    'gemini-2.5-pro-preview-03-25',
+    'gemini-2.0-flash-lite',
+  ];
+
+  const base64 = pdfBuffer.toString('base64');
+  const prompt = `${EXTRACTION_SYSTEM_PROMPT}\n\nExtract ALL transactions from this bank statement PDF. Return ONLY a raw JSON array.`;
 
   for (const modelId of MODELS) {
-    send({ type: 'log', message: `🔮 Sending PDF to Gemini (${modelId}, native PDF mode)...` });
-    const base64 = pdfBuffer.toString('base64');
-    let fullText = '';
-    let lastReport = 0;
-
+    send({ type: 'log', message: `🔮 Trying Gemini model: ${modelId}...` });
     try {
-      const { fullStream } = streamText({
-        model: google(modelId),
-        temperature: 0,
-        maxTokens: 65536,
-        messages: [{
-          role: 'user',
-          content: [
-            { type: 'file', data: base64, mimeType: 'application/pdf' } as { type: 'file'; data: string; mimeType: string },
-            { type: 'text', text: `${EXTRACTION_SYSTEM_PROMPT}\n\nExtract ALL transactions from this bank statement PDF. Return ONLY a raw JSON array.` },
-          ],
-        }],
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { inlineData: { mimeType: 'application/pdf', data: base64 } },
+              { text: prompt },
+            ],
+          }],
+          generationConfig: { temperature: 0, maxOutputTokens: 65536 },
+        }),
       });
 
-      for await (const chunk of fullStream) {
-        if (chunk.type === 'text-delta') {
-          fullText += chunk.textDelta;
-          if (fullText.length - lastReport > 3000) {
-            send({ type: 'log', message: `  ⏳ Receiving... (~${fullText.length.toLocaleString()} chars)` });
-            lastReport = fullText.length;
-          }
-        } else if (chunk.type === 'error') {
-          throw new Error(String((chunk as { error: unknown }).error));
-        }
-      }
-
-      if (fullText.length === 0) {
-        send({ type: 'log', message: `  ⚠ ${modelId} returned empty response, trying next model...` });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: { message: res.statusText } }));
+        const msg = err?.error?.message || res.statusText;
+        send({ type: 'log', message: `  ⚠ ${modelId} API error: ${msg}` });
         continue;
       }
 
-      send({ type: 'log', message: `✓ Gemini response: ${fullText.length.toLocaleString()} chars` });
-      const parsed = JSON.parse(cleanJson(fullText));
+      const data = await res.json();
+      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+
+      if (!text) {
+        const reason = data?.candidates?.[0]?.finishReason ?? 'unknown';
+        send({ type: 'log', message: `  ⚠ ${modelId} returned empty (finishReason: ${reason}), trying next...` });
+        continue;
+      }
+
+      send({ type: 'log', message: `✓ Gemini response: ${text.length.toLocaleString()} chars` });
+      const parsed = JSON.parse(cleanJson(text));
       if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('Gemini returned no transactions.');
-      send({ type: 'log', message: `✓ ${parsed.length} transactions extracted by Gemini` });
+      send({ type: 'log', message: `✓ ${parsed.length} transactions extracted by ${modelId}` });
       return parsed as RawTx[];
 
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       send({ type: 'log', message: `  ⚠ ${modelId} failed: ${msg}` });
-      if (modelId === MODELS[MODELS.length - 1]) throw new Error(`All Gemini models failed. Last error: ${msg}`);
+      if (modelId === MODELS[MODELS.length - 1]) throw new Error(`All Gemini models failed. Last: ${msg}`);
     }
   }
 
