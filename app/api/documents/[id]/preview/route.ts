@@ -41,7 +41,7 @@ export async function GET(
   return NextResponse.json({
     totalRows: rows.length,
     headerIndex: headerResult?.headerIndex ?? null,
-    columnMap: headerResult?.map ?? null,
+    columnMap: headerResult?.xmap ?? null,
     // Slice around detected header: a few rows above + first 60 data rows
     rows: rows.slice(
       Math.max(0, (headerResult?.headerIndex ?? 0) - 2),
@@ -49,7 +49,7 @@ export async function GET(
     ).map(r => r.cells),
     // Also provide parsed transactions preview (first 20)
     transactions: headerResult
-      ? parseTransactions(rows, headerResult.headerIndex, headerResult.map).slice(0, 20)
+      ? parseTransactions(rows, headerResult.headerIndex, headerResult.xmap).slice(0, 20)
       : [],
   });
 }

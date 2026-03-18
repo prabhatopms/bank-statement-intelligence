@@ -95,14 +95,14 @@ export async function POST(
         return;
       }
 
-      const { headerIndex, map } = headerResult;
+      const { headerIndex, xmap } = headerResult;
       const headerRow = rows[headerIndex];
       send({ type: 'log', message: `✓ Headers found on row ${headerIndex + 1}: ${headerRow.cells.join(' | ')}` });
-      send({ type: 'log', message: `  Column map: ${Object.entries(map).map(([k,v]) => `${k}→col${(v as number)+1}`).join(', ')}` });
+      send({ type: 'log', message: `  Column map: ${Object.entries(xmap).map(([k,v]) => `${k}→x${Math.round(v as number)}`).join(', ')}` });
 
       // Parse transactions from rows
       send({ type: 'log', message: '⚙️  Parsing transaction rows...' });
-      const transactions = parseTransactions(rows, headerIndex, map);
+      const transactions = parseTransactions(rows, headerIndex, xmap);
       send({ type: 'log', message: `✓ Parsed ${transactions.length} transaction rows` });
 
       if (transactions.length === 0) {
