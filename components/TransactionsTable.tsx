@@ -52,7 +52,8 @@ interface TransactionsTableProps {
 
 type ColKey =
   | 'date' | 'value_date' | 'description' | 'remarks'
-  | 'amount' | 'balance' | 'mode' | 'merchant' | 'category'
+  | 'withdrawal' | 'deposit' | 'amount' | 'balance'
+  | 'mode' | 'merchant' | 'category'
   | 'counterparty' | 'counterparty_account' | 'counterparty_bank'
   | 'upi_id' | 'transaction_id' | 'reference_number' | 'location'
   | 'document' | 'status';
@@ -60,7 +61,8 @@ type ColKey =
 const ALL_COLUMNS: { key: ColKey; label: string; defaultVisible: boolean }[] = [
   { key: 'date',                label: 'Date',               defaultVisible: true  },
   { key: 'description',         label: 'Description',        defaultVisible: true  },
-  { key: 'amount',              label: 'Amount',             defaultVisible: true  },
+  { key: 'withdrawal',          label: 'Withdrawal (Dr)',     defaultVisible: true  },
+  { key: 'deposit',             label: 'Deposit (Cr)',        defaultVisible: true  },
   { key: 'balance',             label: 'Balance',            defaultVisible: true  },
   { key: 'mode',                label: 'Mode',               defaultVisible: true  },
   { key: 'merchant',            label: 'Merchant',           defaultVisible: true  },
@@ -68,6 +70,7 @@ const ALL_COLUMNS: { key: ColKey; label: string; defaultVisible: boolean }[] = [
   { key: 'counterparty',        label: 'Counterparty',       defaultVisible: true  },
   { key: 'status',              label: 'Status',             defaultVisible: true  },
   { key: 'value_date',          label: 'Value Date',         defaultVisible: false },
+  { key: 'amount',              label: 'Amount (combined)',  defaultVisible: false },
   { key: 'remarks',             label: 'Remarks',            defaultVisible: false },
   { key: 'counterparty_account',label: 'Counterparty A/C',  defaultVisible: false },
   { key: 'counterparty_bank',   label: 'Counterparty Bank',  defaultVisible: false },
@@ -185,6 +188,8 @@ export function TransactionsTable({
               {vis('value_date')           && <th className="text-left p-3 font-medium whitespace-nowrap">Value Date</th>}
               {vis('description')          && <th className="text-left p-3 font-medium">Description</th>}
               {vis('remarks')              && <th className="text-left p-3 font-medium">Remarks</th>}
+              {vis('withdrawal')            && <th className="text-right p-3 font-medium text-red-600">Withdrawal (Dr)</th>}
+              {vis('deposit')              && <th className="text-right p-3 font-medium text-green-600">Deposit (Cr)</th>}
               {vis('amount')               && <th className="text-right p-3 font-medium">Amount</th>}
               {vis('balance')              && <th className="text-right p-3 font-medium">Balance</th>}
               {vis('mode')                 && <th className="text-left p-3 font-medium">Mode</th>}
@@ -223,6 +228,20 @@ export function TransactionsTable({
                 {vis('remarks') && (
                   <td className="p-3 max-w-xs text-muted-foreground">
                     <div className="truncate" title={tx.remarks || ''}>{tx.remarks || '-'}</div>
+                  </td>
+                )}
+                {vis('withdrawal') && (
+                  <td className="p-3 text-right font-medium whitespace-nowrap text-red-600">
+                    {tx.type === 'debit'
+                      ? `₹${parseFloat(String(tx.amount)).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
+                      : <span className="text-muted-foreground/30">—</span>}
+                  </td>
+                )}
+                {vis('deposit') && (
+                  <td className="p-3 text-right font-medium whitespace-nowrap text-green-600">
+                    {tx.type === 'credit'
+                      ? `₹${parseFloat(String(tx.amount)).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
+                      : <span className="text-muted-foreground/30">—</span>}
                   </td>
                 )}
                 {vis('amount') && (

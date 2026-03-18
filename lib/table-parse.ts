@@ -23,7 +23,6 @@ export interface ParsedTransaction {
   mode: string | null;
 }
 
-// Header keyword patterns covering SBI, ICICI, HDFC, Axis, Kotak, Yes Bank etc.
 const PATTERNS: Record<keyof ColumnXMap, RegExp> = {
   date:        /^(date|txn\s*date|tran\s*date|trans\.?\s*date|posting\s*date|transaction\s*date)$/i,
   value_date:  /^(value\s*date|val\.?\s*date|effective\s*date)$/i,
@@ -35,7 +34,38 @@ const PATTERNS: Record<keyof ColumnXMap, RegExp> = {
   mode:        /^(mode|trans(action)?\s*type|type|channel)$/i,
 };
 
-// Detect header row — returns X positions of each column (not indices)
+interface ColZone {
+  field: keyof ColumnXMap;
+  x: number;
+  left: number;
+  right: number;
+}
+
+// Build exclusive zones for each column using midpoints between adjacent X positions.
+// This guarantees no two columns overlap regardless of data cell positions.
+function buildZones(xmap: ColumnXMap): ColZone[] {
+  const entries = (Object.entries(xmap) as [keyof ColumnXMap, number][])
+    .sort(([, a], [, b]) => a - b);
+
+  return entries.map(([field, x], i) => {
+    const prev = entries[i - 1]?.[1] ?? -Infinity;
+    const next = entries[i + 1]?.[1] ?? Infinity;
+    return {
+      field,
+      x,
+      left:  i === 0              ? -Infinity : (x + prev) / 2,
+      right: i === entries.length - 1 ? Infinity  : (x + next) / 2,
+    };
+  });
+}
+
+// Return all text items within a column's exclusive zone, joined as one string
+function cellInZone(row: TableRow, zone: ColZone | undefined): string {
+  if (!zone) return '';
+  const items = row.rawItems.filter(it => it.x >= zone.left && it.x < zone.right);
+  return items.map(it => it.text).join(' ').trim();
+}
+
 export function detectHeader(rows: TableRow[]): { headerIndex: number; xmap: ColumnXMap } | null {
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
@@ -46,7 +76,6 @@ export function detectHeader(rows: TableRow[]): { headerIndex: number; xmap: Col
       const raw = row.cells[j].trim().replace(/[\n\r]+/g, ' ').replace(/\*+$/, '').trim();
       for (const [field, pattern] of Object.entries(PATTERNS) as [keyof ColumnXMap, RegExp][]) {
         if (pattern.test(raw) && xmap[field] === undefined) {
-          // Store the X coordinate of this header cell
           (xmap as Record<string, number>)[field] = row.rawItems[j]?.x ?? j * 50;
           score++;
         }
@@ -55,7 +84,8 @@ export function detectHeader(rows: TableRow[]): { headerIndex: number; xmap: Col
 
     const hasMinFields =
       xmap.date !== undefined &&
-      (xmap.debit !== undefined || xmap.credit !== undefined || xmap.balance !== undefined || xmap.description !== undefined);
+      (xmap.debit !== undefined || xmap.credit !== undefined ||
+       xmap.balance !== undefined || xmap.description !== undefined);
 
     if (score >= 2 && hasMinFields) {
       return { headerIndex: i, xmap };
@@ -64,58 +94,28 @@ export function detectHeader(rows: TableRow[]): { headerIndex: number; xmap: Col
   return null;
 }
 
-// Get the text of the cell whose X position is closest to targetX
-// tolerance: max distance in PDF units (default 40 — generous for column width variance)
-function cellAtX(row: TableRow, targetX: number | undefined, tolerance = 40): string {
-  if (targetX === undefined) return '';
-  let best = '';
-  let bestDist = Infinity;
-  for (const item of row.rawItems) {
-    const dist = Math.abs(item.x - targetX);
-    if (dist < bestDist) {
-      bestDist = dist;
-      best = item.text;
-    }
-  }
-  return bestDist <= tolerance ? best : '';
-}
-
-// Parse date strings into YYYY-MM-DD
 function parseDate(raw: string): string | null {
   if (!raw) return null;
   const s = raw.trim();
-  const MONTHS: Record<string, string> = {
-    jan:'01', feb:'02', mar:'03', apr:'04', may:'05', jun:'06',
-    jul:'07', aug:'08', sep:'09', oct:'10', nov:'11', dec:'12',
+  const M: Record<string, string> = {
+    jan:'01',feb:'02',mar:'03',apr:'04',may:'05',jun:'06',
+    jul:'07',aug:'08',sep:'09',oct:'10',nov:'11',dec:'12',
   };
-  // DD/MM/YYYY or DD-MM-YYYY
   let m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
-  if (m) {
-    const y = m[3].length === 2 ? `20${m[3]}` : m[3];
-    return `${y}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
-  }
-  // DD-Mon-YYYY or DD Mon YYYY
+  if (m) { const y = m[3].length===2?`20${m[3]}`:m[3]; return `${y}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`; }
   m = s.match(/^(\d{1,2})[\s\-]([A-Za-z]{3})[\s\-](\d{2,4})$/);
-  if (m) {
-    const mon = MONTHS[m[2].toLowerCase()];
-    if (mon) {
-      const y = m[3].length === 2 ? `20${m[3]}` : m[3];
-      return `${y}-${mon}-${m[1].padStart(2,'0')}`;
-    }
-  }
-  // YYYY-MM-DD passthrough
+  if (m) { const mo=M[m[2].toLowerCase()]; if(mo){ const y=m[3].length===2?`20${m[3]}`:m[3]; return `${y}-${mo}-${m[1].padStart(2,'0')}`; } }
   if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
   return null;
 }
 
-// Parse amount strings like "1,23,456.78" or "(500.00)" → number
 function parseAmount(raw: string): number | null {
-  if (!raw || !raw.trim()) return null;
+  if (!raw?.trim()) return null;
   const s = raw.trim().replace(/[₹$£€,\s]/g, '');
-  if (!s || s === '-' || s === '.' || /^nil$/i.test(s)) return null;
+  if (!s || s==='-' || s==='.' || /^nil$/i.test(s)) return null;
   const bracketed = s.startsWith('(') && s.endsWith(')');
-  const num = parseFloat(bracketed ? s.slice(1, -1) : s);
-  return isNaN(num) || num === 0 ? null : Math.abs(num);
+  const n = parseFloat(bracketed ? s.slice(1,-1) : s);
+  return isNaN(n) || n===0 ? null : Math.abs(n);
 }
 
 export function parseTransactions(
@@ -123,45 +123,45 @@ export function parseTransactions(
   headerIndex: number,
   xmap: ColumnXMap,
 ): ParsedTransaction[] {
-  const results: ParsedTransaction[] = [];
+  const zones = buildZones(xmap);
+  const z = (field: keyof ColumnXMap) => zones.find(z => z.field === field);
+
   const hasSeparateDrCr = xmap.debit !== undefined && xmap.credit !== undefined;
+  const results: ParsedTransaction[] = [];
 
   for (let i = headerIndex + 1; i < rows.length; i++) {
     const row = rows[i];
     if (row.rawItems.length < 2) continue;
 
-    // Use X-position matching for every field
-    const rawDate = cellAtX(row, xmap.date);
+    const rawDate = cellInZone(row, z('date'));
     const date = parseDate(rawDate);
     if (!date) continue;
 
-    const rawDesc = cellAtX(row, xmap.description);
+    const rawDesc = cellInZone(row, z('description'));
     if (!rawDesc) continue;
 
     let amount: number | null = null;
     let type: 'debit' | 'credit' = 'debit';
 
     if (hasSeparateDrCr) {
-      const drAmt = parseAmount(cellAtX(row, xmap.debit));
-      const crAmt = parseAmount(cellAtX(row, xmap.credit));
-      if (drAmt) { amount = drAmt; type = 'debit'; }
-      else if (crAmt) { amount = crAmt; type = 'credit'; }
+      const dr = parseAmount(cellInZone(row, z('debit')));
+      const cr = parseAmount(cellInZone(row, z('credit')));
+      if (dr)       { amount = dr; type = 'debit'; }
+      else if (cr)  { amount = cr; type = 'credit'; }
     } else {
-      // Single amount column — detect type from description keywords or balance delta
-      const amtX = xmap.debit ?? xmap.credit;
-      amount = parseAmount(cellAtX(row, amtX));
+      const amtZone = z('debit') ?? z('credit');
+      amount = parseAmount(cellInZone(row, amtZone));
       if (!amount) continue;
 
-      const descLower = rawDesc.toLowerCase();
-      const creditKw = ['credit','cr ','deposit','received','salary','refund','reversal','cashback','interest','dividend','inward','neft cr','imps cr','upi cr'];
-      type = creditKw.some(k => descLower.includes(k)) ? 'credit' : 'debit';
+      const dl = rawDesc.toLowerCase();
+      const crKw = ['credit','cr ','deposit','received','salary','refund','reversal','cashback','interest','dividend','inward','neft cr','imps cr','upi cr'];
+      type = crKw.some(k => dl.includes(k)) ? 'credit' : 'debit';
 
       if (xmap.balance !== undefined && results.length > 0) {
-        const prevBal = results[results.length - 1].balance;
-        const currBal = parseAmount(cellAtX(row, xmap.balance));
-        if (prevBal !== null && currBal !== null) {
+        const prevBal = results[results.length-1].balance;
+        const currBal = parseAmount(cellInZone(row, z('balance')));
+        if (prevBal !== null && currBal !== null)
           type = currBal >= prevBal ? 'credit' : 'debit';
-        }
       }
     }
 
@@ -169,14 +169,14 @@ export function parseTransactions(
 
     results.push({
       date,
-      value_date: parseDate(cellAtX(row, xmap.value_date)),
-      description: rawDesc.replace(/\s+/g, ' ').trim(),
+      value_date:      parseDate(cellInZone(row, z('value_date'))),
+      description:     rawDesc.replace(/\s+/g,' ').trim(),
       amount,
-      currency: 'INR',
-      balance: parseAmount(cellAtX(row, xmap.balance)),
+      currency:        'INR',
+      balance:         parseAmount(cellInZone(row, z('balance'))),
       type,
-      reference_number: cellAtX(row, xmap.reference) || null,
-      mode: cellAtX(row, xmap.mode) || null,
+      reference_number: cellInZone(row, z('reference')) || null,
+      mode:             cellInZone(row, z('mode')) || null,
     });
   }
 
