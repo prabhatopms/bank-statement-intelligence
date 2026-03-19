@@ -303,9 +303,9 @@ async function runGeminiMode(
   send({ type: 'log', message: `  ${pageCount} pages, ${(pdfBuffer.length / 1024).toFixed(0)} KB` });
 
   // If previous run was truncated, be more aggressive about chunking
-  let CHUNK_THRESHOLD = 25;
+  let CHUNK_THRESHOLD = 15; // native PDF safe up to ~15 pages (~120 transactions)
   if (prevMeta?.wasPartial) {
-    CHUNK_THRESHOLD = 10;
+    CHUNK_THRESHOLD = 8;
     send({ type: 'log', message: `  ℹ Previous run was truncated (${prevMeta.extracted ?? '?'} recovered). Using aggressive chunking (threshold: ${CHUNK_THRESHOLD} pages).` });
   }
 
@@ -342,11 +342,12 @@ async function runGeminiMode(
     throw new Error('All Gemini models failed on native PDF. Try GPT-4o or Claude mode.');
   } else {
     // --- Text-chunk path (large PDFs) ---
-    const CHUNK = 150000;
+    // 25k chars ≈ 8 pages ≈ 60 transactions per chunk → output stays under 65k token limit
+    const CHUNK = 25000;
     const text = pdfMeta.text;
     const chunks: string[] = [];
     for (let i = 0; i < text.length; i += CHUNK) chunks.push(text.slice(i, i + CHUNK));
-    send({ type: 'log', message: `📦 Large PDF (${pageCount} pages > ${CHUNK_THRESHOLD}) — text-chunk mode: ${chunks.length} chunk(s) @ 150k chars each` });
+    send({ type: 'log', message: `📦 Large PDF (${pageCount} pages > ${CHUNK_THRESHOLD}) — text-chunk mode: ${chunks.length} chunk(s) @ 25k chars each` });
 
     // Pick a working model first (try on chunk 1)
     let chosenModel: string | null = null;
