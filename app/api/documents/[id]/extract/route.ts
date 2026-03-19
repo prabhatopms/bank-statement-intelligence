@@ -423,6 +423,18 @@ async function runClaudeMode(pdfBuffer: Buffer, _userId: string, _documentId: st
   return parsed as RawTx[];
 }
 
+// DELETE /api/documents/[id]/extract — force-reset a stuck extraction
+export async function DELETE(request: NextRequest, { params }: { params: { id: string } }) {
+  const { userId } = await auth();
+  if (!userId) return Response.json({ error: 'Unauthorized' }, { status: 401 });
+  const result = await sql`
+    UPDATE documents SET status = 'uploaded'
+    WHERE id = ${params.id} AND user_id = ${userId} AND status = 'extracting'
+    RETURNING id
+  `;
+  return Response.json({ ok: true, reset: result.length > 0 });
+}
+
 export async function POST(request: NextRequest, { params }: { params: { id: string } }) {
   const { userId } = await auth();
   if (!userId) return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 });
@@ -430,6 +442,7 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
   const documentId = params.id;
   const url = new URL(request.url);
   const mode = url.searchParams.get('mode') || 'auto'; // auto | openai | gemini | claude
+  const clientSignal = request.signal; // aborted when client disconnects
 
   const encoder = new TextEncoder();
   const stream = new TransformStream<Uint8Array, Uint8Array>();
@@ -444,6 +457,11 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
       if (doc.status === 'extracting') { send({ type: 'error', message: 'Extraction already in progress' }); return; }
 
       await sql`UPDATE documents SET status = 'extracting', extracted_at = null WHERE id = ${documentId}`;
+
+      // If client disconnects, reset DB status and bail
+      clientSignal.addEventListener('abort', async () => {
+        try { await sql`UPDATE documents SET status = 'uploaded' WHERE id = ${documentId} AND status = 'extracting'`; } catch { /**/ }
+      }, { once: true });
 
       let pdfPassword: string | undefined;
       if (doc.password_hint) {

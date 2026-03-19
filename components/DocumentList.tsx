@@ -62,6 +62,17 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs, visibleLog]);
 
+  // On mount: auto-reset any stale 'extracting' docs not currently streaming in this session
+  useEffect(() => {
+    const stale = documents.filter(d => d.status === 'extracting' && !extractingIds.has(d.id));
+    stale.forEach(d => {
+      fetch(`/api/documents/${d.id}/extract`, { method: 'DELETE' })
+        .then(() => onRefresh())
+        .catch(() => {});
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // only on mount
+
   const appendLog = useCallback((docId: string, entry: LogEntry) => {
     setLogs(prev => ({ ...prev, [docId]: [...(prev[docId] ?? []), entry] }));
   }, []);
@@ -149,10 +160,13 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
     const controller = abortControllers.current[docId];
     if (controller) {
       controller.abort();
-      appendLog(docId, { time: ts(), message: '🛑 Termination requested — stopping after current operation...', kind: 'aborted' });
+      appendLog(docId, { time: ts(), message: '🛑 Termination requested...', kind: 'aborted' });
       setExtractingIds(prev => { const s = new Set(prev); s.delete(docId); return s; });
       delete abortControllers.current[docId];
-      onRefresh();
+      // Also tell the server to reset the DB status
+      fetch(`/api/documents/${docId}/extract`, { method: 'DELETE' })
+        .then(() => onRefresh())
+        .catch(() => onRefresh());
     }
   };
 
