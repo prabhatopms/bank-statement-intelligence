@@ -156,7 +156,8 @@ async function runOpenAIMode(pdfBuffer: Buffer, password: string | undefined, _u
   const all: RawTx[] = [];
   for (let i = 0; i < chunks.length; i++) {
     send({ type: 'log', message: `🤖 GPT-4o — chunk ${i + 1}/${chunks.length}...` });
-    let fullText = '';
+    let fullText = '', tokenCount = 0;
+    try {
     const { fullStream } = streamText({
       model: openai('gpt-4o'),
       temperature: 0,
@@ -167,7 +168,16 @@ async function runOpenAIMode(pdfBuffer: Buffer, password: string | undefined, _u
       ],
     });
     for await (const chunk of fullStream) {
-      if (chunk.type === 'text-delta') fullText += chunk.textDelta;
+      if (chunk.type === 'text-delta') {
+        fullText += chunk.textDelta;
+        tokenCount++;
+        if (tokenCount % 20 === 0) send({ type: 'token', preview: fullText.slice(-300) });
+      }
+    }
+    if (fullText) send({ type: 'token', preview: fullText.slice(-300) });
+    } catch (e) {
+      send({ type: 'log', message: `  ✗ Chunk ${i + 1} API error: ${e instanceof Error ? e.message : e}` });
+      continue;
     }
     const [chunkTxs, chunkPartial] = parseJsonArray(fullText);
     if (chunkTxs.length > 0) { all.push(...chunkTxs); send({ type: 'log', message: `  ✓ Chunk ${i + 1}: ${chunkTxs.length} transactions${chunkPartial ? ' (partial recovery)' : ''}` }); }
@@ -177,14 +187,68 @@ async function runOpenAIMode(pdfBuffer: Buffer, password: string | undefined, _u
   return all;
 }
 
-// --- Mode: Gemini 2.5 Flash (native PDF, best accuracy) ---
-async function runGeminiMode(pdfBuffer: Buffer, _userId: string, _documentId: string, send: (d: object) => void) {
+// --- Helpers shared by Gemini mode ---
+type GeminiMeta = { wasPartial?: boolean; extracted?: number; model?: string; chunks?: number };
+
+// Stream a single generateContent request to Gemini using SSE, forward tokens to client.
+// Returns the full accumulated text.
+async function geminiStream(
+  modelId: string, apiKey: string, BASE: string,
+  body: object,
+  send: (d: object) => void,
+): Promise<{ text: string; ok: boolean; errMsg?: string }> {
+  const res = await fetch(`${BASE}/v1beta/models/${modelId}:streamGenerateContent?alt=sse&key=${apiKey}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok || !res.body) {
+    const err = await res.json().catch(() => ({}));
+    const errMsg = (err as { error?: { message?: string } })?.error?.message ?? res.statusText;
+    return { text: '', ok: false, errMsg };
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let sseBuffer = '', fullText = '', tokenCount = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    sseBuffer += decoder.decode(value, { stream: true });
+    const lines = sseBuffer.split('\n');
+    sseBuffer = lines.pop() ?? '';
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      try {
+        const chunk = JSON.parse(line.slice(6));
+        const delta: string = chunk?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+        if (delta) {
+          fullText += delta;
+          tokenCount++;
+          // Forward a preview every 10 tokens so the UI shows live output
+          if (tokenCount % 10 === 0) send({ type: 'token', preview: fullText.slice(-300) });
+        }
+      } catch { /* skip malformed SSE lines */ }
+    }
+  }
+  // Final token flush
+  if (fullText) send({ type: 'token', preview: fullText.slice(-300) });
+  return { text: fullText, ok: true };
+}
+
+// --- Mode: Gemini 2.5 Flash (native PDF for small PDFs, text-chunk for large PDFs) ---
+async function runGeminiMode(
+  pdfBuffer: Buffer, _userId: string, _documentId: string,
+  send: (d: object) => void,
+  prevMeta?: GeminiMeta | null,
+): Promise<{ transactions: RawTx[]; meta: GeminiMeta }> {
   const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
   if (!apiKey) throw new Error('GOOGLE_GENERATIVE_AI_API_KEY is not set.');
 
   const BASE = 'https://generativelanguage.googleapis.com';
 
-  // Hardcoded fallback order — newest stable first
   const FALLBACK_MODELS = [
     'gemini-2.0-flash',
     'gemini-2.0-flash-lite',
@@ -193,7 +257,7 @@ async function runGeminiMode(pdfBuffer: Buffer, _userId: string, _documentId: st
     'gemini-1.5-flash-8b',
   ];
 
-  // Step 1: discover which models are actually available for this API key
+  // Step 1: discover best available model
   send({ type: 'log', message: '🔍 Discovering available Gemini models...' });
   let availableModel: string | null = null;
 
@@ -205,8 +269,6 @@ async function runGeminiMode(pdfBuffer: Buffer, _userId: string, _documentId: st
     } else {
       const listData = await listRes.json();
       const models: { name: string; supportedGenerationMethods?: string[] }[] = listData.models ?? [];
-
-      const PREFERRED = ['flash', 'pro'];
       const candidates = models
         .filter(m => m.supportedGenerationMethods?.includes('generateContent'))
         .map(m => m.name.replace('models/', ''))
@@ -216,7 +278,7 @@ async function runGeminiMode(pdfBuffer: Buffer, _userId: string, _documentId: st
       if (candidates.length > 0) send({ type: 'log', message: `  Available: ${candidates.slice(0, 8).join(', ')}${candidates.length > 8 ? '...' : ''}` });
 
       for (const tier of ['2.5', '2.0', '1.5']) {
-        for (const type of PREFERRED) {
+        for (const type of ['flash', 'pro']) {
           const match = candidates.find(id => id.includes(tier) && id.includes(type));
           if (match) { availableModel = match; break; }
         }
@@ -228,58 +290,102 @@ async function runGeminiMode(pdfBuffer: Buffer, _userId: string, _documentId: st
     send({ type: 'log', message: `  ⚠ ListModels failed: ${e instanceof Error ? e.message : e}` });
   }
 
-  // Fall back to hardcoded list if discovery failed or returned nothing
   if (!availableModel) {
-    send({ type: 'log', message: `  ℹ Discovery returned nothing — trying hardcoded fallback list` });
+    send({ type: 'log', message: `  ℹ Discovery returned nothing — using hardcoded fallback list` });
     availableModel = FALLBACK_MODELS[0];
   }
-  send({ type: 'log', message: `🔮 Using model: ${availableModel}` });
-
-  // Step 2: call generateContent — try selected model, then fallbacks
-  const base64 = pdfBuffer.toString('base64');
-  const prompt = `${EXTRACTION_SYSTEM_PROMPT}\n\nExtract ALL transactions from this bank statement PDF. Return ONLY a raw JSON array.`;
-
   const modelsToTry = [availableModel, ...FALLBACK_MODELS.filter(m => m !== availableModel)];
 
-  for (const modelId of modelsToTry) {
-    send({ type: 'log', message: `🔮 Trying model: ${modelId}` });
-    const res = await fetch(`${BASE}/v1beta/models/${modelId}:generateContent?key=${apiKey}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+  // Step 2: determine strategy — native PDF (small) vs text-chunk (large)
+  send({ type: 'log', message: '📄 Reading PDF metadata...' });
+  const pdfMeta = await pdfParse(pdfBuffer);
+  const pageCount = pdfMeta.numpages;
+  send({ type: 'log', message: `  ${pageCount} pages, ${(pdfBuffer.length / 1024).toFixed(0)} KB` });
+
+  // If previous run was truncated, be more aggressive about chunking
+  let CHUNK_THRESHOLD = 25;
+  if (prevMeta?.wasPartial) {
+    CHUNK_THRESHOLD = 10;
+    send({ type: 'log', message: `  ℹ Previous run was truncated (${prevMeta.extracted ?? '?'} recovered). Using aggressive chunking (threshold: ${CHUNK_THRESHOLD} pages).` });
+  }
+
+  const useTextChunks = pageCount > CHUNK_THRESHOLD;
+  const genConfig = { temperature: 0, maxOutputTokens: 65536 };
+
+  if (!useTextChunks) {
+    // --- Native PDF path (best quality) ---
+    send({ type: 'log', message: `🔮 Native PDF mode (${pageCount} pages ≤ ${CHUNK_THRESHOLD})` });
+    const base64 = pdfBuffer.toString('base64');
+    const prompt = `${EXTRACTION_SYSTEM_PROMPT}\n\nExtract ALL transactions from this bank statement PDF. Return ONLY a raw JSON array.`;
+
+    for (const modelId of modelsToTry) {
+      send({ type: 'log', message: `  Trying ${modelId}...` });
+      const { text, ok, errMsg } = await geminiStream(modelId, apiKey, BASE, {
         contents: [{ parts: [
           { inlineData: { mimeType: 'application/pdf', data: base64 } },
           { text: prompt },
         ]}],
-        generationConfig: { temperature: 0, maxOutputTokens: 65536 },
-      }),
-    });
+        generationConfig: genConfig,
+      }, send);
 
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      const msg = (err as { error?: { message?: string } })?.error?.message ?? res.statusText;
-      send({ type: 'log', message: `  ✗ ${modelId} failed (${res.status}): ${msg}` });
-      continue;
+      if (!ok) { send({ type: 'log', message: `  ✗ ${modelId} failed: ${errMsg}` }); continue; }
+      if (!text) { send({ type: 'log', message: `  ✗ ${modelId} returned empty` }); continue; }
+
+      send({ type: 'log', message: `✓ ${modelId} streamed (${text.length.toLocaleString()} chars)` });
+      const [parsed, wasPartial] = parseJsonArray(text);
+      if (parsed.length === 0) { send({ type: 'log', message: `  ✗ ${modelId}: no transactions parsed` }); continue; }
+      if (wasPartial) send({ type: 'log', message: `  ⚠ Truncated — recovered ${parsed.length} transactions from partial JSON` });
+      send({ type: 'log', message: `✓ ${parsed.length} transactions extracted` });
+      return { transactions: parsed as RawTx[], meta: { model: modelId, chunks: 1, extracted: parsed.length, wasPartial } };
     }
 
-    const data = await res.json();
-    const text: string = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-    const finishReason: string = data?.candidates?.[0]?.finishReason ?? '';
+    throw new Error('All Gemini models failed on native PDF. Try GPT-4o or Claude mode.');
+  } else {
+    // --- Text-chunk path (large PDFs) ---
+    const CHUNK = 150000;
+    const text = pdfMeta.text;
+    const chunks: string[] = [];
+    for (let i = 0; i < text.length; i += CHUNK) chunks.push(text.slice(i, i + CHUNK));
+    send({ type: 'log', message: `📦 Large PDF (${pageCount} pages > ${CHUNK_THRESHOLD}) — text-chunk mode: ${chunks.length} chunk(s) @ 150k chars each` });
 
-    if (!text) {
-      send({ type: 'log', message: `  ✗ ${modelId} returned empty (finishReason: ${finishReason || 'unknown'})` });
-      continue;
+    // Pick a working model first (try on chunk 1)
+    let chosenModel: string | null = null;
+    for (const modelId of modelsToTry) {
+      send({ type: 'log', message: `  Model check: ${modelId}` });
+      const testRes = await fetch(`${BASE}/v1beta/models/${modelId}:generateContent?key=${apiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts: [{ text: 'ping' }] }], generationConfig: { maxOutputTokens: 10 } }),
+      });
+      if (testRes.ok) { chosenModel = modelId; break; }
+      const err = await testRes.json().catch(() => ({}));
+      send({ type: 'log', message: `  ✗ ${modelId}: ${(err as { error?: { message?: string } })?.error?.message ?? testRes.statusText}` });
     }
+    if (!chosenModel) throw new Error('All Gemini models failed. Check your API key and quota.');
+    send({ type: 'log', message: `✓ Using ${chosenModel} for ${chunks.length} chunk(s)` });
 
-    send({ type: 'log', message: `✓ ${modelId} responded (${text.length.toLocaleString()} chars)` });
-    const [parsed, wasPartial] = parseJsonArray(text);
-    if (parsed.length === 0) { send({ type: 'log', message: `  ✗ ${modelId}: could not parse any transactions` }); continue; }
-    if (wasPartial) send({ type: 'log', message: `  ⚠ Response was truncated — recovered ${parsed.length} transactions from partial JSON` });
-    send({ type: 'log', message: `✓ ${parsed.length} transactions extracted` });
-    return parsed as RawTx[];
+    const all: RawTx[] = [];
+    let hadPartial = false;
+    for (let i = 0; i < chunks.length; i++) {
+      send({ type: 'log', message: `🔮 Chunk ${i + 1}/${chunks.length}...` });
+      const { text: chunkText, ok, errMsg } = await geminiStream(chosenModel, apiKey, BASE, {
+        contents: [{ parts: [{ text: `${EXTRACTION_SYSTEM_PROMPT}\n\nExtract all transactions (part ${i + 1}/${chunks.length}). Return ONLY raw JSON array.\n\n${chunks[i]}` }] }],
+        generationConfig: genConfig,
+      }, send);
+
+      if (!ok || !chunkText) {
+        send({ type: 'log', message: `  ⚠ Chunk ${i + 1} failed: ${errMsg ?? 'empty response'}` });
+        continue;
+      }
+      const [parsed, wasPartial] = parseJsonArray(chunkText);
+      if (wasPartial) hadPartial = true;
+      send({ type: 'log', message: `  ✓ Chunk ${i + 1}: ${parsed.length} transactions${wasPartial ? ' (partial recovery)' : ''}` });
+      all.push(...(parsed as RawTx[]));
+    }
+    if (all.length === 0) throw new Error('Gemini returned no transactions across all chunks.');
+    send({ type: 'log', message: `✓ Total: ${all.length} transactions from ${chunks.length} chunks` });
+    return { transactions: all, meta: { model: chosenModel, chunks: chunks.length, extracted: all.length, wasPartial: hadPartial } };
   }
-
-  throw new Error(`All Gemini models failed. Check your GOOGLE_GENERATIVE_AI_API_KEY and API quota.`);
 }
 
 // --- Mode: Claude (native PDF) ---
@@ -299,9 +405,15 @@ async function runClaudeMode(pdfBuffer: Buffer, _userId: string, _documentId: st
       ],
     }],
   });
+  let claudeTokenCount = 0;
   for await (const chunk of fullStream) {
-    if (chunk.type === 'text-delta') fullText += chunk.textDelta;
+    if (chunk.type === 'text-delta') {
+      fullText += chunk.textDelta;
+      claudeTokenCount++;
+      if (claudeTokenCount % 20 === 0) send({ type: 'token', preview: fullText.slice(-300) });
+    }
   }
+  if (fullText) send({ type: 'token', preview: fullText.slice(-300) });
   send({ type: 'log', message: `✓ Claude response: ${fullText.length.toLocaleString()} chars` });
   const [parsed, wasPartial] = parseJsonArray(fullText);
   if (parsed.length === 0) throw new Error('Claude returned no transactions.');
@@ -344,11 +456,23 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
       const pdfBuffer = Buffer.from(await pdfResponse.arrayBuffer());
       send({ type: 'log', message: `✓ PDF downloaded (${(pdfBuffer.length / 1024).toFixed(0)} KB)` });
 
+      // Read previous extraction metadata for adaptive improvement
+      const prevMeta: GeminiMeta | null = doc.extraction_meta ?? null;
+
       let transactions: RawTx[];
-      if (mode === 'openai')      transactions = await runOpenAIMode(pdfBuffer, pdfPassword, userId, documentId, send);
-      else if (mode === 'gemini') transactions = await runGeminiMode(pdfBuffer, userId, documentId, send);
-      else if (mode === 'claude') transactions = await runClaudeMode(pdfBuffer, userId, documentId, send);
-      else                        transactions = await runAutoMode(pdfBuffer, pdfPassword, userId, documentId, send);
+      if (mode === 'openai') {
+        transactions = await runOpenAIMode(pdfBuffer, pdfPassword, userId, documentId, send);
+      } else if (mode === 'gemini') {
+        const result = await runGeminiMode(pdfBuffer, userId, documentId, send, prevMeta);
+        transactions = result.transactions;
+        // Persist extraction metadata for next run
+        const flaggedCount = transactions.filter(t => shouldFlag(t.description)).length;
+        await sql`UPDATE documents SET extraction_meta = ${JSON.stringify({ ...result.meta, mode: 'gemini', flaggedCount, extractedAt: new Date().toISOString() })} WHERE id = ${documentId}`;
+      } else if (mode === 'claude') {
+        transactions = await runClaudeMode(pdfBuffer, userId, documentId, send);
+      } else {
+        transactions = await runAutoMode(pdfBuffer, pdfPassword, userId, documentId, send);
+      }
 
       const { inserted, skipped } = await saveTransactions(userId, documentId, transactions, send);
       await sql`UPDATE documents SET status = 'extracted', extracted_at = now() WHERE id = ${documentId}`;

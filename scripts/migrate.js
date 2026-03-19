@@ -68,6 +68,9 @@ async function migrate() {
   await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS remarks TEXT`;
   await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS location TEXT`;
 
+  // Extraction metadata for adaptive improvement
+  await sql`ALTER TABLE documents ADD COLUMN IF NOT EXISTS extraction_meta JSONB`;
+
   await sql`
     CREATE INDEX IF NOT EXISTS idx_documents_user_id ON documents(user_id)
   `;

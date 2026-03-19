@@ -51,6 +51,8 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
   const [visibleLog, setVisibleLog] = useState<string | null>(null);
   // which docs are actively streaming
   const [extractingIds, setExtractingIds] = useState<Set<string>>(new Set());
+  // live token preview while model is generating (cleared on done/error)
+  const [livePreview, setLivePreview] = useState<Record<string, string>>({});
   // abort controllers keyed by docId
   const abortControllers = useRef<Record<string, AbortController>>({});
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -102,20 +104,25 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
           try {
             const event = JSON.parse(line.slice(6));
 
-            if (event.type === 'log') {
+            if (event.type === 'token') {
+              setLivePreview(prev => ({ ...prev, [doc.id]: event.preview ?? '' }));
+            } else if (event.type === 'log') {
               appendLog(doc.id, { time: ts(), message: event.message, kind: 'log' });
             } else if (event.type === 'done') {
+              setLivePreview(prev => { const n = { ...prev }; delete n[doc.id]; return n; });
               appendLog(doc.id, { time: ts(), message: `✅ Done — ${event.inserted} new transactions imported · ${event.skipped} duplicates skipped`, kind: 'done' });
               toast({ title: 'Extraction complete', description: `✓ ${event.inserted} new · ⊘ ${event.skipped} duplicates` });
               setExtractingIds(prev => { const s = new Set(prev); s.delete(doc.id); return s; });
               delete abortControllers.current[doc.id];
               onRefresh();
             } else if (event.type === 'aborted') {
+              setLivePreview(prev => { const n = { ...prev }; delete n[doc.id]; return n; });
               appendLog(doc.id, { time: ts(), message: '🛑 Extraction terminated by user.', kind: 'aborted' });
               setExtractingIds(prev => { const s = new Set(prev); s.delete(doc.id); return s; });
               delete abortControllers.current[doc.id];
               onRefresh();
             } else if (event.type === 'error') {
+              setLivePreview(prev => { const n = { ...prev }; delete n[doc.id]; return n; });
               appendLog(doc.id, { time: ts(), message: `❌ Error: ${event.message}`, kind: 'error' });
               toast({ title: 'Extraction failed', description: event.message, variant: 'destructive' });
               setExtractingIds(prev => { const s = new Set(prev); s.delete(doc.id); return s; });
@@ -337,12 +344,22 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
                 <span>{entry.message}</span>
               </div>
             ))}
-            {isActiveRunning && (
+            {isActiveRunning && visibleLog && livePreview[visibleLog] ? (
+              <div className="mt-2 rounded border border-gray-700 bg-gray-900 p-2">
+                <div className="flex items-center gap-2 mb-1 text-yellow-400 text-[10px]">
+                  <span className="animate-pulse">●</span>
+                  <span>Model output (live)</span>
+                </div>
+                <p className="text-[10px] text-gray-400 font-mono break-all leading-relaxed line-clamp-4 whitespace-pre-wrap">
+                  {livePreview[visibleLog]}
+                </p>
+              </div>
+            ) : isActiveRunning ? (
               <div className="flex gap-3 text-yellow-500 animate-pulse">
                 <span className="text-gray-600 shrink-0">{ts()}</span>
-                <span>⏳ Processing...</span>
+                <span>⏳ Waiting for model...</span>
               </div>
-            )}
+            ) : null}
             <div ref={logEndRef} />
           </div>
         </div>
