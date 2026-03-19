@@ -188,7 +188,12 @@ async function runOpenAIMode(pdfBuffer: Buffer, password: string | undefined, _u
 }
 
 // --- Helpers shared by Gemini mode ---
-type GeminiMeta = { wasPartial?: boolean; extracted?: number; model?: string; chunks?: number };
+type GeminiMeta = {
+  wasPartial?: boolean; extracted?: number; model?: string;
+  chunks?: number; totalChunks?: number;
+  resumeFromChunk?: number; // next chunk index to process (0 = start fresh)
+  completedChunks?: number;
+};
 
 // Stream a single generateContent request to Gemini using SSE, forward tokens to client.
 // Returns the full accumulated text.
@@ -243,7 +248,9 @@ async function runGeminiMode(
   pdfBuffer: Buffer, _userId: string, _documentId: string,
   send: (d: object) => void,
   prevMeta?: GeminiMeta | null,
-): Promise<{ transactions: RawTx[]; meta: GeminiMeta }> {
+  // Called after each chunk is successfully parsed — allows caller to save + persist resume point
+  onChunkDone?: (txns: RawTx[], chunkIdx: number, totalChunks: number, modelId: string) => Promise<void>,
+): Promise<{ transactions: RawTx[]; meta: GeminiMeta; savedPerChunk: boolean }> {
   const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
   if (!apiKey) throw new Error('GOOGLE_GENERATIVE_AI_API_KEY is not set.');
 
@@ -336,7 +343,7 @@ async function runGeminiMode(
       if (parsed.length === 0) { send({ type: 'log', message: `  ✗ ${modelId}: no transactions parsed` }); continue; }
       if (wasPartial) send({ type: 'log', message: `  ⚠ Truncated — recovered ${parsed.length} transactions from partial JSON` });
       send({ type: 'log', message: `✓ ${parsed.length} transactions extracted` });
-      return { transactions: parsed as RawTx[], meta: { model: modelId, chunks: 1, extracted: parsed.length, wasPartial } };
+      return { transactions: parsed as RawTx[], meta: { model: modelId, chunks: 1, extracted: parsed.length, wasPartial }, savedPerChunk: false };
     }
 
     throw new Error('All Gemini models failed on native PDF. Try GPT-4o or Claude mode.');
@@ -365,9 +372,18 @@ async function runGeminiMode(
     if (!chosenModel) throw new Error('All Gemini models failed. Check your API key and quota.');
     send({ type: 'log', message: `✓ Using ${chosenModel} for ${chunks.length} chunk(s)` });
 
+    const resumeFrom = prevMeta?.resumeFromChunk ?? 0;
+    if (resumeFrom > 0) {
+      send({ type: 'log', message: `⏩ Resuming from chunk ${resumeFrom + 1}/${chunks.length} — first ${resumeFrom} chunk(s) already saved to DB` });
+    }
+
     const all: RawTx[] = [];
     let hadPartial = false;
     for (let i = 0; i < chunks.length; i++) {
+      if (i < resumeFrom) {
+        send({ type: 'log', message: `  ⏭ Chunk ${i + 1}/${chunks.length} — already saved, skipping` });
+        continue;
+      }
       send({ type: 'log', message: `🔮 Chunk ${i + 1}/${chunks.length}...` });
       const { text: chunkText, ok, errMsg } = await geminiStream(chosenModel, apiKey, BASE, {
         contents: [{ parts: [{ text: `${EXTRACTION_SYSTEM_PROMPT}\n\nExtract all transactions (part ${i + 1}/${chunks.length}). Return ONLY raw JSON array.\n\n${chunks[i]}` }] }],
@@ -381,11 +397,14 @@ async function runGeminiMode(
       const [parsed, wasPartial] = parseJsonArray(chunkText);
       if (wasPartial) hadPartial = true;
       send({ type: 'log', message: `  ✓ Chunk ${i + 1}: ${parsed.length} transactions${wasPartial ? ' (partial recovery)' : ''}` });
-      all.push(...(parsed as RawTx[]));
+      if (parsed.length > 0) {
+        if (onChunkDone) await onChunkDone(parsed as RawTx[], i, chunks.length, chosenModel!);
+        all.push(...(parsed as RawTx[]));
+      }
     }
-    if (all.length === 0) throw new Error('Gemini returned no transactions across all chunks.');
-    send({ type: 'log', message: `✓ Total: ${all.length} transactions from ${chunks.length} chunks` });
-    return { transactions: all, meta: { model: chosenModel, chunks: chunks.length, extracted: all.length, wasPartial: hadPartial } };
+    if (all.length === 0 && resumeFrom === 0) throw new Error('Gemini returned no transactions across all chunks.');
+    send({ type: 'log', message: `✓ Total: ${all.length} new transactions from ${chunks.length - resumeFrom} chunk(s)` });
+    return { transactions: all, meta: { model: chosenModel, chunks: chunks.length, extracted: all.length, wasPartial: hadPartial }, savedPerChunk: !!onChunkDone };
   }
 }
 
@@ -479,23 +498,55 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
       const prevMeta: GeminiMeta | null = doc.extraction_meta ?? null;
 
       let transactions: RawTx[];
+      let earlyDone = false;
+
       if (mode === 'openai') {
         transactions = await runOpenAIMode(pdfBuffer, pdfPassword, userId, documentId, send);
       } else if (mode === 'gemini') {
-        const result = await runGeminiMode(pdfBuffer, userId, documentId, send, prevMeta);
+        let chunkInserted = 0, chunkSkipped = 0;
+        const result = await runGeminiMode(pdfBuffer, userId, documentId, send, prevMeta,
+          async (txns, chunkIdx, totalChunks, modelId) => {
+            const counts = await saveTransactions(userId, documentId, txns, send);
+            chunkInserted += counts.inserted; chunkSkipped += counts.skipped;
+            // Persist resume point so next run can skip done chunks
+            await sql`UPDATE documents SET extraction_meta = ${JSON.stringify({
+              model: modelId, mode: 'gemini', totalChunks,
+              resumeFromChunk: chunkIdx + 1, completedChunks: chunkIdx + 1,
+              extractedAt: new Date().toISOString(),
+            })} WHERE id = ${documentId}`;
+          });
         transactions = result.transactions;
-        // Persist extraction metadata for next run
-        const flaggedCount = transactions.filter(t => shouldFlag(t.description)).length;
-        await sql`UPDATE documents SET extraction_meta = ${JSON.stringify({ ...result.meta, mode: 'gemini', flaggedCount, extractedAt: new Date().toISOString() })} WHERE id = ${documentId}`;
+
+        if (result.savedPerChunk) {
+          // Per-chunk saves are done; reset resume point and mark complete
+          await sql`UPDATE documents SET extraction_meta = ${JSON.stringify({
+            model: result.meta.model, mode: 'gemini',
+            totalChunks: result.meta.chunks, resumeFromChunk: 0, completedChunks: result.meta.chunks,
+            extracted: (prevMeta?.extracted ?? 0) + transactions.length,
+            wasPartial: result.meta.wasPartial, extractedAt: new Date().toISOString(),
+          })} WHERE id = ${documentId}`;
+          await sql`UPDATE documents SET status = 'extracted', extracted_at = now() WHERE id = ${documentId}`;
+          const totalSaved = (prevMeta?.resumeFromChunk ?? 0) > 0
+            ? `${chunkInserted} new from resumed chunks`
+            : `${chunkInserted} new`;
+          send({ type: 'done', inserted: chunkInserted, skipped: chunkSkipped, total: transactions.length, note: totalSaved });
+          earlyDone = true;
+        } else {
+          // Native PDF path — fall through to common save below
+          const flaggedCount = transactions.filter(t => shouldFlag(t.description)).length;
+          await sql`UPDATE documents SET extraction_meta = ${JSON.stringify({ ...result.meta, mode: 'gemini', flaggedCount, resumeFromChunk: 0, extractedAt: new Date().toISOString() })} WHERE id = ${documentId}`;
+        }
       } else if (mode === 'claude') {
         transactions = await runClaudeMode(pdfBuffer, userId, documentId, send);
       } else {
         transactions = await runAutoMode(pdfBuffer, pdfPassword, userId, documentId, send);
       }
 
-      const { inserted, skipped } = await saveTransactions(userId, documentId, transactions, send);
-      await sql`UPDATE documents SET status = 'extracted', extracted_at = now() WHERE id = ${documentId}`;
-      send({ type: 'done', inserted, skipped, total: transactions.length });
+      if (!earlyDone) {
+        const { inserted, skipped } = await saveTransactions(userId, documentId, transactions!, send);
+        await sql`UPDATE documents SET status = 'extracted', extracted_at = now() WHERE id = ${documentId}`;
+        send({ type: 'done', inserted, skipped, total: transactions!.length });
+      }
 
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
