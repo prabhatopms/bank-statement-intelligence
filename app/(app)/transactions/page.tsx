@@ -23,6 +23,10 @@ export default function TransactionsPage() {
     enriched: '',
     date_from: '',
     date_to: '',
+    amount_min: '',
+    amount_max: '',
+    withdrawal_min: '',
+    withdrawal_max: '',
     page: 1,
   });
 
@@ -36,6 +40,10 @@ export default function TransactionsPage() {
       if (filters.enriched) params.set('enriched', filters.enriched);
       if (filters.date_from) params.set('date_from', filters.date_from);
       if (filters.date_to) params.set('date_to', filters.date_to);
+      if (filters.amount_min) params.set('amount_min', filters.amount_min);
+      if (filters.amount_max) params.set('amount_max', filters.amount_max);
+      if (filters.withdrawal_min) params.set('withdrawal_min', filters.withdrawal_min);
+      if (filters.withdrawal_max) params.set('withdrawal_max', filters.withdrawal_max);
       params.set('page', String(filters.page));
 
       const res = await fetch(`/api/transactions?${params.toString()}`);
@@ -125,7 +133,7 @@ export default function TransactionsPage() {
         <div className="flex items-center gap-2 mb-4">
           <Filter className="h-4 w-4 text-muted-foreground" />
           <span className="text-sm font-medium">Filters</span>
-          <Button size="sm" variant="ghost" onClick={() => setFilters({ search: '', category: '', flagged: '', enriched: '', date_from: '', date_to: '', page: 1 })}>
+          <Button size="sm" variant="ghost" onClick={() => setFilters({ search: '', category: '', flagged: '', enriched: '', date_from: '', date_to: '', amount_min: '', amount_max: '', withdrawal_min: '', withdrawal_max: '', page: 1 })}>
             <RefreshCw className="h-3 w-3 mr-1" />
             Reset
           </Button>
@@ -164,6 +172,44 @@ export default function TransactionsPage() {
           </Select>
           <Input type="date" value={filters.date_from} onChange={(e) => setFilters(f => ({ ...f, date_from: e.target.value, page: 1 }))} />
           <Input type="date" value={filters.date_to} onChange={(e) => setFilters(f => ({ ...f, date_to: e.target.value, page: 1 }))} />
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3">
+          <div className="relative">
+            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground pointer-events-none">₹ min</span>
+            <Input
+              type="number" min="0" placeholder="Amount min"
+              className="pl-12"
+              value={filters.amount_min}
+              onChange={(e) => setFilters(f => ({ ...f, amount_min: e.target.value, page: 1 }))}
+            />
+          </div>
+          <div className="relative">
+            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground pointer-events-none">₹ max</span>
+            <Input
+              type="number" min="0" placeholder="Amount max"
+              className="pl-12"
+              value={filters.amount_max}
+              onChange={(e) => setFilters(f => ({ ...f, amount_max: e.target.value, page: 1 }))}
+            />
+          </div>
+          <div className="relative">
+            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-red-400 pointer-events-none">↓ min</span>
+            <Input
+              type="number" min="0" placeholder="Withdrawal min"
+              className="pl-12"
+              value={filters.withdrawal_min}
+              onChange={(e) => setFilters(f => ({ ...f, withdrawal_min: e.target.value, page: 1 }))}
+            />
+          </div>
+          <div className="relative">
+            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-red-400 pointer-events-none">↓ max</span>
+            <Input
+              type="number" min="0" placeholder="Withdrawal max"
+              className="pl-12"
+              value={filters.withdrawal_max}
+              onChange={(e) => setFilters(f => ({ ...f, withdrawal_max: e.target.value, page: 1 }))}
+            />
+          </div>
         </div>
       </div>
 

@@ -22,6 +22,10 @@ export async function GET(request: NextRequest) {
     const documentId = searchParams.get('document_id') || '';
     const dateFrom = searchParams.get('date_from') || '';
     const dateTo = searchParams.get('date_to') || '';
+    const amountMin = searchParams.get('amount_min') || '';
+    const amountMax = searchParams.get('amount_max') || '';
+    const withdrawalMin = searchParams.get('withdrawal_min') || '';
+    const withdrawalMax = searchParams.get('withdrawal_max') || '';
 
     const params: unknown[] = [userId];
     const conditions: string[] = ['t.user_id = $1'];
@@ -49,6 +53,22 @@ export async function GET(request: NextRequest) {
     if (dateTo) {
       params.push(dateTo);
       conditions.push(`t.date <= $${params.length}`);
+    }
+    if (amountMin) {
+      params.push(parseFloat(amountMin));
+      conditions.push(`t.amount >= $${params.length}`);
+    }
+    if (amountMax) {
+      params.push(parseFloat(amountMax));
+      conditions.push(`t.amount <= $${params.length}`);
+    }
+    if (withdrawalMin) {
+      params.push(parseFloat(withdrawalMin));
+      conditions.push(`t.type = 'debit' AND t.amount >= $${params.length}`);
+    }
+    if (withdrawalMax) {
+      params.push(parseFloat(withdrawalMax));
+      conditions.push(`(t.type = 'debit' AND t.amount <= $${params.length})`);
     }
 
     const whereClause = conditions.join(' AND ');
