@@ -1,8 +1,28 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { auth } from '@clerk/nextjs/server';
-import { generateText } from 'ai';
 import sql from '@/lib/db';
-import { getLLMModel } from '@/lib/llm';
+
+// Use Gemini REST directly (same key as extraction, no ANTHROPIC_API_KEY needed)
+async function geminiText(prompt: string): Promise<string> {
+  const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+  if (!apiKey) throw new Error('GOOGLE_GENERATIVE_AI_API_KEY not set');
+  const BASE = 'https://generativelanguage.googleapis.com';
+  for (const model of ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']) {
+    const res = await fetch(`${BASE}/v1beta/models/${model}:generateContent?key=${apiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0, maxOutputTokens: 512 },
+      }),
+    });
+    if (!res.ok) continue;
+    const data = await res.json();
+    const text: string = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+    if (text) return text;
+  }
+  throw new Error('Gemini enrichment failed — all models unavailable');
+}
 
 const CATEGORIES = [
   'Food & Dining', 'Travel', 'Shopping', 'Utilities', 'Healthcare',
@@ -55,13 +75,9 @@ export async function POST(
         website = topResult.link || '';
       }
 
-      const model = getLLMModel('anthropic', 'claude-haiku-4-5-20251001');
-      const { text } = await generateText({
-        model,
-        prompt: `Based on merchant name "${merchant}", categorize this transaction.
+      const text = await geminiText(`Based on merchant name "${merchant}", categorize this transaction.
 Return a JSON object: { "category": "one of: ${CATEGORIES.join(', ')}" }
-Return ONLY raw JSON, no markdown.`,
-      });
+Return ONLY raw JSON, no markdown.`);
 
       let category = 'Other';
       try {
@@ -83,10 +99,7 @@ Return ONLY raw JSON, no markdown.`,
 
       return NextResponse.json({ success: true, merchant, website, category });
     } else {
-      const model = getLLMModel('anthropic', 'claude-haiku-4-5-20251001');
-      const { text } = await generateText({
-        model,
-        prompt: `Analyze this bank transaction and extract merchant information.
+      const text = await geminiText(`Analyze this bank transaction and extract merchant information.
 Transaction description: "${tx.description}"
 Amount: ${tx.amount} ${tx.currency}
 Type: ${tx.type}
@@ -99,8 +112,7 @@ Return a JSON object with these fields:
   "flagged": boolean (true if suspicious),
   "flagReason": "reason if flagged, else empty string"
 }
-Return ONLY raw JSON, no markdown, no explanation.`,
-      });
+Return ONLY raw JSON, no markdown, no explanation.`);
 
       let enrichData = {
         merchant: tx.description,
