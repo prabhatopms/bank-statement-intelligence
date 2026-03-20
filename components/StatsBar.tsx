@@ -1,3 +1,5 @@
+import { StatsCard } from '@/lib/apollo-wind';
+
 interface Stats {
   total: number;
   total_debits: number;
@@ -12,33 +14,34 @@ interface StatsBarProps {
 
 export function StatsBar({ stats }: StatsBarProps) {
   const enrichedPct = stats.total > 0 ? Math.round((stats.enriched_count / stats.total) * 100) : 0;
+  const fmtINR = (n: number) => `₹${parseFloat(String(n || 0)).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-      <div className="bg-white rounded-lg border p-4">
-        <div className="text-2xl font-bold">{stats.total?.toLocaleString() || 0}</div>
-        <div className="text-sm text-muted-foreground mt-1">Total Transactions</div>
-      </div>
-      <div className="bg-white rounded-lg border p-4">
-        <div className="text-2xl font-bold text-red-600">
-          &#8377;{parseFloat(String(stats.total_debits || 0)).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
-        </div>
-        <div className="text-sm text-muted-foreground mt-1">Total Debits</div>
-      </div>
-      <div className="bg-white rounded-lg border p-4">
-        <div className="text-2xl font-bold text-green-600">
-          &#8377;{parseFloat(String(stats.total_credits || 0)).toLocaleString('en-IN', { maximumFractionDigits: 0 })}
-        </div>
-        <div className="text-sm text-muted-foreground mt-1">Total Credits</div>
-      </div>
-      <div className="bg-white rounded-lg border p-4">
-        <div className="text-2xl font-bold text-yellow-600">{stats.flagged_count || 0}</div>
-        <div className="text-sm text-muted-foreground mt-1">Flagged</div>
-      </div>
-      <div className="bg-white rounded-lg border p-4">
-        <div className="text-2xl font-bold text-blue-600">{enrichedPct}%</div>
-        <div className="text-sm text-muted-foreground mt-1">Enriched</div>
-      </div>
+      <StatsCard
+        title="Total Transactions"
+        value={stats.total?.toLocaleString() || 0}
+      />
+      <StatsCard
+        title="Total Debits"
+        value={fmtINR(stats.total_debits)}
+        variant="danger"
+      />
+      <StatsCard
+        title="Total Credits"
+        value={fmtINR(stats.total_credits)}
+        variant="success"
+      />
+      <StatsCard
+        title="Flagged"
+        value={stats.flagged_count || 0}
+        variant="warning"
+      />
+      <StatsCard
+        title="Enriched"
+        value={`${enrichedPct}%`}
+        variant="primary"
+      />
     </div>
   );
 }

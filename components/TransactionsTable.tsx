@@ -3,9 +3,7 @@
 import { useState } from 'react';
 import { format } from 'date-fns';
 import { Sparkles, AlertTriangle, CheckCircle, ChevronLeft, ChevronRight, SlidersHorizontal } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { useToast } from '@/hooks/use-toast';
+import { Button, Badge, Checkbox, Spinner, toast } from '@/lib/apollo-wind';
 
 interface Transaction {
   id: string;
@@ -100,7 +98,6 @@ export function TransactionsTable({
   const [enriching, setEnriching] = useState<string | null>(null);
   const [visibleCols, setVisibleCols] = useState<Set<ColKey>>(DEFAULT_VISIBLE);
   const [showColPicker, setShowColPicker] = useState(false);
-  const { toast } = useToast();
 
   const toggleCol = (key: ColKey) => {
     setVisibleCols(prev => {
@@ -116,10 +113,10 @@ export function TransactionsTable({
       const res = await fetch(`/api/transactions/${id}/enrich?mode=${mode}`, { method: 'POST' });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
-      toast({ title: 'Transaction enriched', description: `Merchant: ${data.merchant || 'N/A'} · Category: ${data.category || 'N/A'}` });
+      toast('Transaction enriched', { description: `Merchant: ${data.merchant || 'N/A'} · Category: ${data.category || 'N/A'}` });
       onRefresh();
     } catch (error) {
-      toast({ title: 'Enrichment failed', description: error instanceof Error ? error.message : 'Unknown error', variant: 'destructive' });
+      toast.error('Enrichment failed', { description: error instanceof Error ? error.message : 'Unknown error' });
     } finally {
       setEnriching(null);
     }
@@ -145,7 +142,6 @@ export function TransactionsTable({
 
   return (
     <div className="space-y-3">
-      {/* Column visibility toggle */}
       <div className="flex justify-end relative">
         <Button size="sm" variant="outline" onClick={() => setShowColPicker(v => !v)}>
           <SlidersHorizontal className="h-4 w-4 mr-2" />
@@ -156,11 +152,9 @@ export function TransactionsTable({
             <p className="text-xs font-semibold text-muted-foreground uppercase mb-2">Toggle columns</p>
             {ALL_COLUMNS.map(col => (
               <label key={col.key} className="flex items-center gap-2 cursor-pointer text-sm hover:bg-muted/40 px-1 py-0.5 rounded">
-                <input
-                  type="checkbox"
+                <Checkbox
                   checked={visibleCols.has(col.key)}
-                  onChange={() => toggleCol(col.key)}
-                  className="rounded"
+                  onCheckedChange={() => toggleCol(col.key)}
                 />
                 {col.label}
                 {!col.defaultVisible && (
@@ -177,11 +171,9 @@ export function TransactionsTable({
           <thead>
             <tr className="border-b bg-muted/50">
               <th className="p-3 w-8">
-                <input
-                  type="checkbox"
+                <Checkbox
                   checked={selectedIds.length === transactions.length && transactions.length > 0}
-                  onChange={toggleSelectAll}
-                  className="rounded"
+                  onCheckedChange={toggleSelectAll}
                 />
               </th>
               {vis('date')                 && <th className="text-left p-3 font-medium whitespace-nowrap">Date</th>}
@@ -211,7 +203,10 @@ export function TransactionsTable({
             {transactions.map((tx) => (
               <tr key={tx.id} className={`border-b last:border-0 hover:bg-muted/20 ${selectedIds.includes(tx.id) ? 'bg-blue-50' : ''}`}>
                 <td className="p-3">
-                  <input type="checkbox" checked={selectedIds.includes(tx.id)} onChange={() => toggleSelect(tx.id)} className="rounded" />
+                  <Checkbox
+                    checked={selectedIds.includes(tx.id)}
+                    onCheckedChange={() => toggleSelect(tx.id)}
+                  />
                 </td>
 
                 {vis('date') && (
@@ -332,7 +327,9 @@ export function TransactionsTable({
                     disabled={enriching === tx.id}
                     title="Enrich with AI"
                   >
-                    <Sparkles className={`h-4 w-4 ${enriching === tx.id ? 'animate-pulse' : ''}`} />
+                    {enriching === tx.id
+                      ? <Spinner size="sm" />
+                      : <Sparkles className="h-4 w-4" />}
                   </Button>
                 </td>
               </tr>

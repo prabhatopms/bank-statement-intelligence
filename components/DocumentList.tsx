@@ -1,11 +1,19 @@
 "use client"
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { FileText, Trash2, Download, Zap, Clock, CheckCircle, XCircle, Loader2, Terminal, StopCircle, Eye } from 'lucide-react';
+import { FileText, Trash2, Download, Zap, Clock, CheckCircle, XCircle, Terminal, StopCircle, Eye } from 'lucide-react';
 import { TablePreview } from '@/components/TablePreview';
-import { Button } from '@/components/ui/button';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
-import { useToast } from '@/hooks/use-toast';
+import {
+  Button,
+  Spinner,
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+  toast,
+} from '@/lib/apollo-wind';
 
 interface Document {
   id: string;
@@ -26,7 +34,7 @@ interface LogEntry { time: string; message: string; kind: 'log' | 'error' | 'don
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, { cls: string; icon: React.ReactNode }> = {
     uploaded:   { cls: 'bg-gray-100 text-gray-700',    icon: <Clock className="h-3 w-3" /> },
-    extracting: { cls: 'bg-yellow-100 text-yellow-800', icon: <Loader2 className="h-3 w-3 animate-spin" /> },
+    extracting: { cls: 'bg-yellow-100 text-yellow-800', icon: <Spinner size="sm" /> },
     extracted:  { cls: 'bg-green-100 text-green-800',   icon: <CheckCircle className="h-3 w-3" /> },
     failed:     { cls: 'bg-red-100 text-red-700',       icon: <XCircle className="h-3 w-3" /> },
   };
@@ -44,25 +52,18 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
   const [extractModal, setExtractModal] = useState<Document | null>(null);
   const [extractMode, setExtractMode] = useState<'auto' | 'openai' | 'gemini' | 'claude'>('gemini');
 
-  // logs[docId] = array of entries — persists across open/close
   const [logs, setLogs] = useState<Record<string, LogEntry[]>>({});
   const [previewDoc, setPreviewDoc] = useState<Document | null>(null);
-  // which doc's log panel is currently visible
   const [visibleLog, setVisibleLog] = useState<string | null>(null);
-  // which docs are actively streaming
   const [extractingIds, setExtractingIds] = useState<Set<string>>(new Set());
-  // live token preview while model is generating (cleared on done/error)
   const [livePreview, setLivePreview] = useState<Record<string, string>>({});
-  // abort controllers keyed by docId
   const abortControllers = useRef<Record<string, AbortController>>({});
   const logEndRef = useRef<HTMLDivElement>(null);
-  const { toast } = useToast();
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs, visibleLog]);
 
-  // On mount: auto-reset any stale 'extracting' docs not currently streaming in this session
   useEffect(() => {
     const stale = documents.filter(d => d.status === 'extracting' && !extractingIds.has(d.id));
     stale.forEach(d => {
@@ -71,7 +72,7 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
         .catch(() => {});
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // only on mount
+  }, []);
 
   const appendLog = useCallback((docId: string, entry: LogEntry) => {
     setLogs(prev => ({ ...prev, [docId]: [...(prev[docId] ?? []), entry] }));
@@ -85,7 +86,6 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
     const controller = new AbortController();
     abortControllers.current[doc.id] = controller;
 
-    // Reset log for this doc and show panel
     setLogs(prev => ({ ...prev, [doc.id]: [{ time: ts(), message: `Starting extraction for ${doc.filename}...`, kind: 'log' }] }));
     setVisibleLog(doc.id);
     setExtractingIds(prev => new Set(prev).add(doc.id));
@@ -122,7 +122,7 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
             } else if (event.type === 'done') {
               setLivePreview(prev => { const n = { ...prev }; delete n[doc.id]; return n; });
               appendLog(doc.id, { time: ts(), message: `✅ Done — ${event.inserted} new transactions imported · ${event.skipped} duplicates skipped`, kind: 'done' });
-              toast({ title: 'Extraction complete', description: `✓ ${event.inserted} new · ⊘ ${event.skipped} duplicates` });
+              toast('Extraction complete', { description: `✓ ${event.inserted} new · ⊘ ${event.skipped} duplicates` });
               setExtractingIds(prev => { const s = new Set(prev); s.delete(doc.id); return s; });
               delete abortControllers.current[doc.id];
               onRefresh();
@@ -135,7 +135,7 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
             } else if (event.type === 'error') {
               setLivePreview(prev => { const n = { ...prev }; delete n[doc.id]; return n; });
               appendLog(doc.id, { time: ts(), message: `❌ Error: ${event.message}`, kind: 'error' });
-              toast({ title: 'Extraction failed', description: event.message, variant: 'destructive' });
+              toast.error('Extraction failed', { description: event.message });
               setExtractingIds(prev => { const s = new Set(prev); s.delete(doc.id); return s; });
               delete abortControllers.current[doc.id];
               onRefresh();
@@ -148,7 +148,7 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
       if (!aborted) {
         const msg = error instanceof Error ? error.message : 'Unknown error';
         appendLog(doc.id, { time: ts(), message: `❌ ${msg}`, kind: 'error' });
-        toast({ title: 'Extraction failed', description: msg, variant: 'destructive' });
+        toast.error('Extraction failed', { description: msg });
       }
       setExtractingIds(prev => { const s = new Set(prev); s.delete(doc.id); return s; });
       delete abortControllers.current[doc.id];
@@ -163,7 +163,6 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
       appendLog(docId, { time: ts(), message: '🛑 Termination requested...', kind: 'aborted' });
       setExtractingIds(prev => { const s = new Set(prev); s.delete(docId); return s; });
       delete abortControllers.current[docId];
-      // Also tell the server to reset the DB status
       fetch(`/api/documents/${docId}/extract`, { method: 'DELETE' })
         .then(() => onRefresh())
         .catch(() => onRefresh());
@@ -176,10 +175,10 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
       const res = await fetch(`/api/documents/${doc.id}/transactions`, { method: 'DELETE' });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed');
-      toast({ title: 'Transactions cleared', description: `${data.deleted} transactions deleted` });
+      toast('Transactions cleared', { description: `${data.deleted} transactions deleted` });
       onRefresh();
     } catch {
-      toast({ title: 'Failed to clear transactions', variant: 'destructive' });
+      toast.error('Failed to clear transactions');
     }
   };
 
@@ -188,12 +187,12 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
     try {
       const res = await fetch(`/api/documents?id=${doc.id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Delete failed');
-      toast({ title: 'Document deleted' });
+      toast('Document deleted');
       setLogs(prev => { const n = { ...prev }; delete n[doc.id]; return n; });
       if (visibleLog === doc.id) setVisibleLog(null);
       onRefresh();
     } catch {
-      toast({ title: 'Delete failed', variant: 'destructive' });
+      toast.error('Delete failed');
     }
   };
 
@@ -244,7 +243,6 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
                   </td>
                   <td className="p-4">
                     <div className="flex items-center justify-end gap-1">
-                      {/* Log toggle — shown if there's any log for this doc */}
                       {hasLog && (
                         <Button
                           size="sm" variant="ghost"
@@ -256,7 +254,6 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
                         </Button>
                       )}
 
-                      {/* Preview table */}
                       <Button
                         size="sm" variant="ghost"
                         onClick={() => setPreviewDoc(doc)}
@@ -266,7 +263,6 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
                         <Eye className="h-4 w-4" />
                       </Button>
 
-                      {/* Terminate — only while extracting */}
                       {isExtracting && (
                         <Button
                           size="sm" variant="ghost"
@@ -284,7 +280,7 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
                         disabled={isExtracting}
                       >
                         {isExtracting
-                          ? <><Loader2 className="h-4 w-4 animate-spin mr-1" />Extracting...</>
+                          ? <><Spinner size="sm" className="mr-1" />Extracting...</>
                           : <><Zap className="h-4 w-4 mr-1" />Extract</>}
                       </Button>
 
@@ -324,7 +320,6 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
         </table>
       </div>
 
-      {/* Live / historical log panel */}
       {visibleLog && (
         <div className="rounded-lg border bg-gray-950 text-gray-100 text-xs font-mono overflow-hidden">
           <div className="flex items-center justify-between px-4 py-2 bg-gray-900 border-b border-gray-800">

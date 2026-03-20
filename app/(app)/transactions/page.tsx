@@ -1,14 +1,10 @@
 "use client"
 
 import { useState, useEffect, useCallback } from 'react';
-import { Download, Sparkles, Loader2, Filter, Search, RefreshCw } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Download, Sparkles, Filter, Search, RefreshCw } from 'lucide-react';
+import { Button, Input, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Spinner, toast } from '@/lib/apollo-wind';
 import { TransactionsTable } from '@/components/TransactionsTable';
 import { StatsBar } from '@/components/StatsBar';
-import { Toaster } from '@/components/ui/toaster';
-import { useToast } from '@/hooks/use-toast';
 
 const CATEGORIES = ['All', 'Food & Dining', 'Travel', 'Shopping', 'Utilities', 'Healthcare', 'Entertainment', 'Finance', 'Income', 'Transfer', 'Other'];
 
@@ -30,8 +26,6 @@ export default function TransactionsPage() {
     page: 1,
   });
 
-  const { toast } = useToast();
-
   const fetchTransactions = useCallback(async () => {
     setLoading(true);
     try {
@@ -50,11 +44,11 @@ export default function TransactionsPage() {
       setPagination(data.pagination || { page: 1, pages: 1, total: 0 });
       setStats(data.stats || { total: 0, total_debits: 0, total_credits: 0, flagged_count: 0, enriched_count: 0 });
     } catch {
-      toast({ title: 'Failed to load transactions', variant: 'destructive' });
+      toast.error('Failed to load transactions');
     } finally {
       setLoading(false);
     }
-  }, [filters, toast]);
+  }, [filters]);
 
   useEffect(() => { fetchTransactions(); }, [fetchTransactions]);
 
@@ -68,11 +62,11 @@ export default function TransactionsPage() {
         body: JSON.stringify({ ids: selectedIds, mode }),
       });
       const data = await res.json();
-      toast({ title: 'Bulk enrichment complete', description: `${data.processed} transactions enriched` });
+      toast('Bulk enrichment complete', { description: `${data.processed} transactions enriched` });
       setSelectedIds([]);
       fetchTransactions();
     } catch {
-      toast({ title: 'Bulk enrichment failed', variant: 'destructive' });
+      toast.error('Bulk enrichment failed');
     } finally {
       setEnrichingBulk(false);
     }
@@ -87,10 +81,10 @@ export default function TransactionsPage() {
         body: JSON.stringify({ enrichAll: true, mode: 'ai' }),
       });
       const data = await res.json();
-      toast({ title: 'Enrichment started', description: `Processing ${data.processed} transactions` });
+      toast('Enrichment started', { description: `Processing ${data.processed} transactions` });
       fetchTransactions();
     } catch {
-      toast({ title: 'Enrichment failed', variant: 'destructive' });
+      toast.error('Enrichment failed');
     } finally {
       setEnrichingBulk(false);
     }
@@ -102,7 +96,6 @@ export default function TransactionsPage() {
 
   return (
     <div className="space-y-6">
-      <Toaster />
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Transactions</h1>
@@ -116,7 +109,7 @@ export default function TransactionsPage() {
             </Button>
           )}
           <Button variant="outline" onClick={handleEnrichAll} disabled={enrichingBulk}>
-            {enrichingBulk ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Sparkles className="h-4 w-4 mr-2" />}
+            {enrichingBulk ? <Spinner size="sm" className="mr-2" /> : <Sparkles className="h-4 w-4 mr-2" />}
             Enrich All Unenriched
           </Button>
           <Button variant="outline" onClick={handleExport}>
@@ -176,7 +169,7 @@ export default function TransactionsPage() {
 
       {loading ? (
         <div className="flex items-center justify-center py-20">
-          <Loader2 className="h-10 w-10 animate-spin text-muted-foreground" />
+          <Spinner size="xl" />
         </div>
       ) : (
         <TransactionsTable

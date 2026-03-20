@@ -1,13 +1,9 @@
 "use client"
 
 import { useState, useEffect, useRef } from 'react';
-import { Upload, FileText, Loader2 } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
+import { Upload, FileText } from 'lucide-react';
+import { Button, Input, Label, Spinner, toast } from '@/lib/apollo-wind';
 import { DocumentList } from '@/components/DocumentList';
-import { Toaster } from '@/components/ui/toaster';
-import { useToast } from '@/hooks/use-toast';
 
 interface Document {
   id: string;
@@ -24,7 +20,6 @@ export default function DocumentsPage() {
   const [uploading, setUploading] = useState(false);
   const [password, setPassword] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { toast } = useToast();
 
   const fetchDocuments = async () => {
     try {
@@ -32,7 +27,7 @@ export default function DocumentsPage() {
       const data = await res.json();
       setDocuments(data.documents || []);
     } catch {
-      toast({ title: 'Failed to load documents', variant: 'destructive' });
+      toast.error('Failed to load documents');
     } finally {
       setLoading(false);
     }
@@ -55,12 +50,12 @@ export default function DocumentsPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Upload failed');
 
-      toast({ title: 'Document uploaded', description: `${file.name} uploaded successfully` });
+      toast('Document uploaded', { description: `${file.name} uploaded successfully` });
       setPassword('');
       if (fileInputRef.current) fileInputRef.current.value = '';
       fetchDocuments();
     } catch (error) {
-      toast({ title: 'Upload failed', description: error instanceof Error ? error.message : 'Unknown error', variant: 'destructive' });
+      toast.error('Upload failed', { description: error instanceof Error ? error.message : 'Unknown error' });
     } finally {
       setUploading(false);
     }
@@ -68,7 +63,6 @@ export default function DocumentsPage() {
 
   return (
     <div className="space-y-8">
-      <Toaster />
       <div>
         <h1 className="text-2xl font-bold">Documents</h1>
         <p className="text-muted-foreground mt-1">Upload bank statements — transactions are extracted automatically using coordinate-based PDF parsing</p>
@@ -98,7 +92,7 @@ export default function DocumentsPage() {
             </div>
           </div>
           <Button type="submit" disabled={uploading}>
-            {uploading ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Upload className="h-4 w-4 mr-2" />}
+            {uploading ? <Spinner size="sm" className="mr-2" /> : <Upload className="h-4 w-4 mr-2" />}
             {uploading ? 'Uploading...' : 'Upload Document'}
           </Button>
         </form>
@@ -111,7 +105,7 @@ export default function DocumentsPage() {
         </h2>
         {loading ? (
           <div className="flex items-center justify-center py-12">
-            <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+            <Spinner size="lg" />
           </div>
         ) : (
           <DocumentList documents={documents} onRefresh={fetchDocuments} />

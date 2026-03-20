@@ -1,10 +1,17 @@
 "use client"
 
 import { useState } from 'react';
-import { Loader2, Table2, CheckCircle, XCircle, AlertTriangle } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
-import { Badge } from '@/components/ui/badge';
+import { Table2, CheckCircle, XCircle, AlertTriangle } from 'lucide-react';
+import {
+  Button,
+  Badge,
+  Spinner,
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from '@/lib/apollo-wind';
 
 interface ParsedTransaction {
   date: string;
@@ -75,8 +82,8 @@ export function TablePreview({ documentId, filename, open, onClose }: TablePrevi
         <div className="flex-1 overflow-hidden flex flex-col gap-3 min-h-0">
           {loading && (
             <div className="flex items-center justify-center py-16 gap-3 text-muted-foreground">
-              <Loader2 className="h-6 w-6 animate-spin" />
-              Parsing PDF table structure...
+              <Spinner size="default" />
+              <span>Parsing PDF table structure...</span>
             </div>
           )}
 
@@ -89,7 +96,6 @@ export function TablePreview({ documentId, filename, open, onClose }: TablePrevi
 
           {data && (
             <>
-              {/* Stats bar */}
               <div className="flex items-center gap-4 text-sm flex-wrap">
                 <span className="text-muted-foreground">Total rows: <strong>{data.totalRows}</strong></span>
                 {data.headerIndex !== null ? (
@@ -117,7 +123,6 @@ export function TablePreview({ documentId, filename, open, onClose }: TablePrevi
                 </span>
               </div>
 
-              {/* View toggle */}
               <div className="flex gap-2">
                 <Button
                   size="sm" variant={view === 'parsed' ? 'default' : 'outline'}
@@ -132,12 +137,11 @@ export function TablePreview({ documentId, filename, open, onClose }: TablePrevi
                   Raw Table
                 </Button>
                 <Button size="sm" variant="ghost" onClick={load} className="ml-auto">
-                  <Loader2 className={`h-3 w-3 mr-1 ${loading ? 'animate-spin' : ''}`} />
+                  {loading ? <Spinner size="sm" className="mr-1" /> : null}
                   Reload
                 </Button>
               </div>
 
-              {/* Parsed transactions table */}
               {view === 'parsed' && (
                 <div className="overflow-auto flex-1 border rounded-lg">
                   {data.transactions.length === 0 ? (
@@ -181,7 +185,6 @@ export function TablePreview({ documentId, filename, open, onClose }: TablePrevi
                 </div>
               )}
 
-              {/* Raw rows table */}
               {view === 'raw' && (
                 <div className="overflow-auto flex-1 border rounded-lg">
                   <table className="w-full text-xs font-mono">

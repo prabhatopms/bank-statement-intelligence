@@ -2,11 +2,7 @@
 
 import { useState } from 'react';
 import { Key, Trash2, AlertTriangle, Settings, Eye, EyeOff } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Toaster } from '@/components/ui/toaster';
-import { useToast } from '@/hooks/use-toast';
+import { Button, Input, Label, toast } from '@/lib/apollo-wind';
 
 function MaskedInput({ label, envVar, placeholder }: { label: string; envVar: string; placeholder?: string }) {
   const [show, setShow] = useState(false);
@@ -37,7 +33,6 @@ function MaskedInput({ label, envVar, placeholder }: { label: string; envVar: st
 
 export default function SettingsPage() {
   const [deleting, setDeleting] = useState(false);
-  const { toast } = useToast();
 
   const handleDeleteAll = async () => {
     if (!confirm('Are you sure? This will permanently delete ALL your documents and transactions. This cannot be undone.')) return;
@@ -47,9 +42,9 @@ export default function SettingsPage() {
     try {
       const res = await fetch('/api/user/delete-all', { method: 'DELETE' });
       if (!res.ok) throw new Error('Failed to delete data');
-      toast({ title: 'All data deleted', description: 'Your documents and transactions have been permanently deleted' });
+      toast('All data deleted', { description: 'Your documents and transactions have been permanently deleted' });
     } catch {
-      toast({ title: 'Failed to delete data', variant: 'destructive' });
+      toast.error('Failed to delete data');
     } finally {
       setDeleting(false);
     }
@@ -57,7 +52,6 @@ export default function SettingsPage() {
 
   return (
     <div className="space-y-8 max-w-2xl">
-      <Toaster />
       <div>
         <h1 className="text-2xl font-bold flex items-center gap-2">
           <Settings className="h-6 w-6" />
