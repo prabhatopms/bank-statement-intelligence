@@ -31,3 +31,6 @@ next-env.d.ts
 .DS_Store
 *.pem
 .env*.local
+
+# clerk configuration (can include secrets)
+/.clerk/

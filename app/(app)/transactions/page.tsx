@@ -2,7 +2,11 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Download, Sparkles, Filter, Search, RefreshCw, X } from 'lucide-react';
-import { Button, Input, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Spinner, toast } from '@/lib/apollo-wind';
+import { toast } from 'sonner';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Spinner } from '@/components/ui/spinner';
 import { TransactionsTable } from '@/components/TransactionsTable';
 import { StatsBar } from '@/components/StatsBar';
 import { CATEGORIES } from '@/lib/enrich';
@@ -114,7 +118,7 @@ export default function TransactionsPage() {
               setEnrichProgress(p => ({ ...p, failed: p.failed + 1 }));
             } else if (ev.type === 'done') {
               setEnrichProgress(p => ({ ...p, running: false, processed: ev.processed, failed: ev.failed, total: ev.total }));
-              toast('Enrichment complete', { description: `${ev.processed} enriched · ${ev.failed} failed` });
+              toast.success('Enrichment complete', { description: `${ev.processed} enriched · ${ev.failed} failed` });
               setSelectedIds([]);
               fetchTransactions();
             }

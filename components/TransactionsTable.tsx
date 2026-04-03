@@ -3,7 +3,11 @@
 import { useState } from 'react';
 import { format } from 'date-fns';
 import { Sparkles, AlertTriangle, CheckCircle, ChevronLeft, ChevronRight, SlidersHorizontal } from 'lucide-react';
-import { Button, Badge, Checkbox, Spinner, toast } from '@/lib/apollo-wind';
+import { toast } from 'sonner';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Spinner } from '@/components/ui/spinner';
 
 interface Transaction {
   id: string;
@@ -124,7 +128,7 @@ export function TransactionsTable({
       const res = await fetch(`/api/transactions/${id}/enrich?mode=${mode}`, { method: 'POST' });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
-      toast('Transaction enriched', { description: `Merchant: ${data.merchant || 'N/A'} · Category: ${data.category || 'N/A'}` });
+      toast.success('Transaction enriched', { description: `Merchant: ${data.merchant || 'N/A'} · Category: ${data.category || 'N/A'}` });
       onRefresh();
     } catch (error) {
       toast.error('Enrichment failed', { description: error instanceof Error ? error.message : 'Unknown error' });

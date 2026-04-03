@@ -2,7 +2,10 @@
 
 import { useState } from 'react';
 import { Key, Trash2, AlertTriangle, Settings, Eye, EyeOff } from 'lucide-react';
-import { Button, Input, Label, toast } from '@/lib/apollo-wind';
+import { toast } from 'sonner';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 
 function MaskedInput({ label, envVar, placeholder }: { label: string; envVar: string; placeholder?: string }) {
   const [show, setShow] = useState(false);
@@ -42,7 +45,7 @@ export default function SettingsPage() {
     try {
       const res = await fetch('/api/user/delete-all', { method: 'DELETE' });
       if (!res.ok) throw new Error('Failed to delete data');
-      toast('All data deleted', { description: 'Your documents and transactions have been permanently deleted' });
+      toast.success('All data deleted', { description: 'Your documents and transactions have been permanently deleted' });
     } catch {
       toast.error('Failed to delete data');
     } finally {

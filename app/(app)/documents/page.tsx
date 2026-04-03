@@ -2,7 +2,11 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { Upload, FileText } from 'lucide-react';
-import { Button, Input, Label, Spinner, toast } from '@/lib/apollo-wind';
+import { toast } from 'sonner';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Spinner } from '@/components/ui/spinner';
 import { DocumentList } from '@/components/DocumentList';
 
 interface Document {
@@ -50,7 +54,7 @@ export default function DocumentsPage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Upload failed');
 
-      toast('Document uploaded', { description: `${file.name} uploaded successfully` });
+      toast.success('Document uploaded', { description: `${file.name} uploaded successfully` });
       setPassword('');
       if (fileInputRef.current) fileInputRef.current.value = '';
       fetchDocuments();

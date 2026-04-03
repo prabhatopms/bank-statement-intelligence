@@ -4,7 +4,7 @@ import { auth } from '@clerk/nextjs/server';
 import { redirect } from 'next/navigation';
 import { UserButton } from '@clerk/nextjs';
 import Link from 'next/link';
-import { FileText, BarChart2, Settings, CreditCard } from 'lucide-react';
+import { FileText, BarChart2, Settings, CreditCard, TrendingUp } from 'lucide-react';
 
 export default async function AppLayout({
   children,
@@ -32,6 +32,10 @@ export default async function AppLayout({
                 <Link href="/transactions" className="flex items-center gap-2 text-sm font-medium text-gray-600 hover:text-gray-900 transition-colors">
                   <BarChart2 className="h-4 w-4" />
                   Transactions
+                </Link>
+                <Link href="/investments" className="flex items-center gap-2 text-sm font-medium text-gray-600 hover:text-gray-900 transition-colors">
+                  <TrendingUp className="h-4 w-4" />
+                  Investments
                 </Link>
                 <Link href="/settings" className="flex items-center gap-2 text-sm font-medium text-gray-600 hover:text-gray-900 transition-colors">
                   <Settings className="h-4 w-4" />

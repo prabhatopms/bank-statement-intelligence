@@ -3,17 +3,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { FileText, Trash2, Download, Zap, Clock, CheckCircle, XCircle, Terminal, StopCircle, Eye } from 'lucide-react';
 import { TablePreview } from '@/components/TablePreview';
-import {
-  Button,
-  Spinner,
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-  DialogFooter,
-  toast,
-} from '@/lib/apollo-wind';
+import { toast } from 'sonner';
+import { Button } from '@/components/ui/button';
+import { Spinner } from '@/components/ui/spinner';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 
 interface Document {
   id: string;
@@ -122,7 +115,7 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
             } else if (event.type === 'done') {
               setLivePreview(prev => { const n = { ...prev }; delete n[doc.id]; return n; });
               appendLog(doc.id, { time: ts(), message: `✅ Done — ${event.inserted} new transactions imported · ${event.skipped} duplicates skipped`, kind: 'done' });
-              toast('Extraction complete', { description: `✓ ${event.inserted} new · ⊘ ${event.skipped} duplicates` });
+              toast.success('Extraction complete', { description: `✓ ${event.inserted} new · ⊘ ${event.skipped} duplicates` });
               setExtractingIds(prev => { const s = new Set(prev); s.delete(doc.id); return s; });
               delete abortControllers.current[doc.id];
               onRefresh();
@@ -175,7 +168,7 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
       const res = await fetch(`/api/documents/${doc.id}/transactions`, { method: 'DELETE' });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed');
-      toast('Transactions cleared', { description: `${data.deleted} transactions deleted` });
+      toast.success('Transactions cleared', { description: `${data.deleted} transactions deleted` });
       onRefresh();
     } catch {
       toast.error('Failed to clear transactions');
@@ -187,7 +180,7 @@ export function DocumentList({ documents, onRefresh }: DocumentListProps) {
     try {
       const res = await fetch(`/api/documents?id=${doc.id}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Delete failed');
-      toast('Document deleted');
+      toast.success('Document deleted');
       setLogs(prev => { const n = { ...prev }; delete n[doc.id]; return n; });
       if (visibleLog === doc.id) setVisibleLog(null);
       onRefresh();

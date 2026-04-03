@@ -2,16 +2,10 @@
 
 import { useState } from 'react';
 import { Table2, CheckCircle, XCircle, AlertTriangle } from 'lucide-react';
-import {
-  Button,
-  Badge,
-  Spinner,
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-} from '@/lib/apollo-wind';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Spinner } from '@/components/ui/spinner';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 
 interface ParsedTransaction {
   date: string;
@@ -82,7 +76,7 @@ export function TablePreview({ documentId, filename, open, onClose }: TablePrevi
         <div className="flex-1 overflow-hidden flex flex-col gap-3 min-h-0">
           {loading && (
             <div className="flex items-center justify-center py-16 gap-3 text-muted-foreground">
-              <Spinner size="default" />
+              <Spinner size="md" />
               <span>Parsing PDF table structure...</span>
             </div>
           )}
