@@ -5,13 +5,9 @@ import { Download, Sparkles, Filter, Search, RefreshCw, X } from 'lucide-react';
 import { Button, Input, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Spinner, toast } from '@/lib/apollo-wind';
 import { TransactionsTable } from '@/components/TransactionsTable';
 import { StatsBar } from '@/components/StatsBar';
+import { CATEGORIES } from '@/lib/enrich';
 
-const CATEGORIES = [
-  'All', 'Food & Dining', 'Travel & Transport', 'Shopping', 'Utilities & Bills',
-  'Healthcare', 'Entertainment', 'Finance & Investment', 'Income & Salary',
-  'Personal Transfer', 'EMI & Loans', 'ATM & Cash', 'Subscriptions',
-  'Insurance', 'Education', 'Government & Tax', 'Other',
-];
+const CATEGORY_OPTIONS = ['All', ...CATEGORIES];
 
 interface EnrichProgress {
   running: boolean;
@@ -238,7 +234,7 @@ export default function TransactionsPage() {
           <Select value={filters.category || 'all'} onValueChange={(v) => setFilters(f => ({ ...f, category: v === 'all' ? '' : v, page: 1 }))}>
             <SelectTrigger><SelectValue placeholder="Category" /></SelectTrigger>
             <SelectContent>
-              {CATEGORIES.map(c => <SelectItem key={c} value={c.toLowerCase() === 'all' ? 'all' : c}>{c}</SelectItem>)}
+              {CATEGORY_OPTIONS.map(c => <SelectItem key={c} value={c === 'All' ? 'all' : c}>{c}</SelectItem>)}
             </SelectContent>
           </Select>
           <Select value={filters.flagged || 'all'} onValueChange={(v) => setFilters(f => ({ ...f, flagged: v === 'all' ? '' : v, page: 1 }))}>

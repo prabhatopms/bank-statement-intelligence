@@ -28,12 +28,59 @@ interface TxInput {
   flag_reason?: string | null;
 }
 
-const CATEGORIES = [
-  'Food & Dining', 'Travel & Transport', 'Shopping', 'Utilities & Bills',
-  'Healthcare', 'Entertainment', 'Finance & Investment', 'Income & Salary',
-  'Personal Transfer', 'EMI & Loans', 'ATM & Cash', 'Subscriptions',
-  'Insurance', 'Education', 'Government & Tax', 'Other',
+// Main categories
+export const CATEGORIES = [
+  'Food & Dining',
+  'Transport & Travel',
+  'Shopping',
+  'Bills & Utilities',
+  'Subscriptions & Entertainment',
+  'Investments & Trading',
+  'Dividends & Returns',
+  'EMI & Loans',
+  'Insurance',
+  'Salary & Income',
+  'Freelance & Work Income',
+  'Personal Transfer — Friend/Family',
+  'Splitwise & Shared Expenses',
+  'Household Help & Staff',
+  'Housing & Society',
+  'Healthcare',
+  'Education',
+  'Wallet & Prepaid Top-up',
+  'ATM & Cash',
+  'Bank Charges & Fees',
+  'Government & Tax',
+  'Cashback & Refund',
+  'Other',
 ];
+
+// Sub-categories mapped to each main category (for reference in prompt)
+const SUB_CATEGORY_MAP: Record<string, string[]> = {
+  'Food & Dining': ['Food Delivery (Swiggy/Zomato/Dunzo)', 'Restaurant / Cafe / Dining Out', 'Grocery & Supermarket', 'Quick Commerce (Blinkit/Zepto/Instamart)'],
+  'Transport & Travel': ['Cab / Auto / Bike Taxi (Ola/Uber/Rapido)', 'Metro / Bus / Public Transport', 'Train Ticket', 'Flight Ticket', 'Hotel / Accommodation', 'Fuel', 'Parking', 'Delhi Transport / IOCL'],
+  'Shopping': ['Online Shopping (Amazon/Flipkart)', 'Clothing & Fashion', 'Electronics & Gadgets', 'Household Items', 'Books & Stationery', 'Other Retail'],
+  'Bills & Utilities': ['Electricity Bill', 'Mobile Recharge / Postpaid Bill', 'Internet / Broadband / DTH', 'Water / Gas Bill', 'LPG Cylinder'],
+  'Subscriptions & Entertainment': ['OTT Streaming (Netflix/Hotstar/Prime)', 'YouTube Premium', 'Apple One / Apple TV+', 'iCloud / Cloud Storage', 'Gaming', 'Music (Spotify/Gaana)', 'App Subscriptions', 'Movie Ticket'],
+  'Investments & Trading': ['Mutual Fund SIP (Groww/Zerodha/Upstox)', 'Stock Purchase', 'Crypto', 'Fixed Deposit', 'Recurring Deposit', 'Gold / SGBs', 'NPS'],
+  'Dividends & Returns': ['Stock Dividend', 'Mutual Fund Dividend/Returns', 'FD Interest', 'Gold Bond Interest'],
+  'EMI & Loans': ['Home Loan EMI', 'Car Loan EMI', 'Personal Loan EMI', 'Education Loan EMI', 'Gold Loan (Muthoot/Manappuram)', 'Credit Card Bill Payment', 'BNPL Repayment'],
+  'Insurance': ['Life Insurance Premium', 'Health Insurance Premium', 'Vehicle Insurance Premium', 'Term Insurance'],
+  'Salary & Income': ['Monthly Salary (NEFT/RTGS)', 'Bonus / Incentive', 'Pension'],
+  'Freelance & Work Income': ['Client Payment / Project Fee', 'PayPal / Foreign Remittance', 'Consulting Fee', 'Business Income'],
+  'Personal Transfer — Friend/Family': ['Sent to Friend', 'Received from Friend', 'Sent to Family Member', 'Received from Family', 'Unknown Individual UPI'],
+  'Splitwise & Shared Expenses': ['Splitwise Settlement', 'Group Trip Settlement', 'Bill Split'],
+  'Household Help & Staff': ['Maid / Domestic Help', 'Cook / Chef', 'Driver', 'Security / Guard', 'Nanny / Babysitter', 'Other Domestic Staff'],
+  'Housing & Society': ['Rent Payment', 'Society / Maintenance Charges', 'Property Tax', 'Parking Charges (Society)', 'Home Services (Plumber/Electrician)', 'Interior / Renovation'],
+  'Healthcare': ['Doctor / Consultation', 'Pharmacy / Medicine', 'Lab Test / Diagnostics', 'Hospital Bill', 'Dental', 'Optical / Glasses'],
+  'Education': ['School / College Fees', 'Online Course / EdTech', 'Books & Study Material', 'Coaching / Tuition'],
+  'Wallet & Prepaid Top-up': ['Paytm Wallet Top-up', 'PhonePe Wallet', 'Amazon Pay Wallet', 'Metro Card / FASTag Recharge'],
+  'ATM & Cash': ['ATM Withdrawal', 'Cash Deposit', 'Cash Advance'],
+  'Bank Charges & Fees': ['Account Maintenance Fee', 'SMS / Alert Charges', 'Cheque Bounce Fee', 'NEFT / IMPS Processing Fee', 'Forex Markup'],
+  'Government & Tax': ['Income Tax / TDS', 'GST Payment', 'Challan / Fine', 'Government Fee'],
+  'Cashback & Refund': ['Cashback Received', 'Refund from Merchant', 'Reward Redemption'],
+  'Other': ['Unclear / Unable to Determine'],
+};
 
 async function geminiText(prompt: string): Promise<string> {
   const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
@@ -57,28 +104,58 @@ async function geminiText(prompt: string): Promise<string> {
 }
 
 export async function enrichTransaction(tx: TxInput): Promise<EnrichResult> {
-  const prompt = `You are analyzing an Indian bank transaction. Extract rich details so the account holder can easily understand what this transaction is about.
+  const subCatExamples = Object.entries(SUB_CATEGORY_MAP)
+    .map(([cat, subs]) => `  "${cat}": ${subs.slice(0, 3).join(' / ')}`)
+    .join('\n');
+
+  const prompt = `You are analyzing an Indian bank transaction. Your goal is to make it easy for a layperson to understand exactly what happened.
 
 Transaction details:
 - Raw bank description: "${tx.description}"
-- Amount: ₹${tx.amount} (${tx.type === 'debit' ? 'Debit / Money going OUT' : 'Credit / Money coming IN'})
-- Transaction mode: ${tx.mode || 'Unknown'}
-- Counterparty name on bank record: ${tx.counterparty || 'Not specified'}
-- UPI ID (if any): ${tx.upi_id || 'N/A'}
+- Amount: ₹${tx.amount} (${tx.type === 'debit' ? 'Debit — money going OUT' : 'Credit — money coming IN'})
+- Transaction mode from bank: ${tx.mode || 'Not specified'}
+- Counterparty on bank record: ${tx.counterparty || 'Not specified'}
+- UPI VPA (if any): ${tx.upi_id || 'N/A'}
 
-Return ONLY a raw JSON object with NO markdown, no explanation, no code fences:
+Key patterns to recognise in Indian bank descriptions:
+- "UPI-SWIGGY" / "UPI-ZOMATO" / "DUNZO" = food delivery
+- "UPI-RAPIDO" / "UPI-OLACABS" / "UPI-UBER" = cab/transport
+- "ACH/Groww" / "SYRMAGROWW" = Groww mutual fund/stock investment
+- "ACH/NMDC" / "ACH/LT FOODS" / "ACH/GESL" / "ACH/Muthoot" with credit = dividend income
+- "ACH D- TATA AIA" = insurance premium debit
+- "NEFT-CITIN...UIPATH" or similar with large credit = salary
+- "NEFT-CITIN...PAYPAL" = PayPal foreign income
+- "appleservices.b" / "APPLAMP" / "billdeskpg.appl" = Apple subscription (iCloud/Apple One/App Store)
+- "MSI/YOUTUBE" = YouTube Premium
+- "UPI/airtelcommonpoo" = Airtel postpaid/broadband bill
+- "BIL/ONL/..." = online bill payment (electricity/water)
+- "ecoworld-buildi" = society maintenance
+- "PAYTMADDMONEY" / "POS...PAYTM" = Paytm wallet top-up
+- "REV_INSTA ALERT" = reversed bank alert charge
+- "Splitwise" in description = expense splitting
+- Named individuals via UPI (e.g. "mssugandhi", "Sushmita Gupta", "Jitendra K") with small-medium recurring amounts = likely household help (maid, cook, driver) or personal transfer
+- "BHARATPE" in UPI = merchant via BharatPe terminal (small shop)
+- "ACH D-" prefix = NACH auto-debit (EMI, insurance, SIP)
+
+Categories to choose from (pick EXACTLY one):
+${CATEGORIES.join(' | ')}
+
+Sub-category examples per category:
+${subCatExamples}
+
+Return ONLY a raw JSON object — no markdown, no code fences, no explanation:
 {
-  "label": "3-6 word human label, e.g.: 'Swiggy food delivery', 'Maid salary January', 'HDFC credit card bill', 'Rent payment to landlord', 'Amazon shopping', 'Electricity bill BSES', 'GPay transfer to Rahul', 'PhonePe recharge Jio', 'SIP Axis Mutual Fund', 'ATM cash withdrawal'",
-  "merchant": "Cleaned merchant or recipient name. For UPI to individual, use the person name from counterparty or UPI ID. For businesses use their proper brand name.",
-  "website": "Official website URL only if you are confident (e.g. swiggy.com, zomato.com, amazon.in). Empty string if unknown.",
-  "category": "Pick exactly one: ${CATEGORIES.join(' | ')}",
-  "sub_category": "More specific, e.g.: Food Delivery, Grocery, Restaurant, Cafe, Cab/Taxi, Auto, Metro, Bus, Train Ticket, Flight, Hotel, Online Shopping, Clothing, Electronics, Household Items, Electricity Bill, Mobile Recharge, Internet/Broadband, Water Bill, Gas Bill, Doctor Visit, Pharmacy, Hospital, Lab Test, OTT Subscription, Movie Ticket, Gaming, Mutual Fund/SIP, Stocks/Shares, FD/RD, Salary, Freelance Income, Business Income, Rent Payment, Domestic Help Salary, Property Tax, Home Loan EMI, Car Loan EMI, Personal Loan EMI, Credit Card Bill, ATM Withdrawal, Cash Deposit, School/College Fees, Insurance Premium, GPay/PhonePe Self Transfer, etc.",
-  "transaction_type": "Pick one: UPI Payment | NEFT | IMPS | RTGS | ATM Withdrawal | Cash Deposit | Salary Credit | EMI Debit | Interest Credit | Cashback | Refund | Bill Payment | Bank Transfer | Card Payment | Cheque | Standing Instruction | Other",
-  "recipient_type": "Pick one: Individual | Business | Bank/NBFC | Government | Self/Own Account",
-  "payment_app": "Payment app if identifiable from description or UPI ID: GPay | PhonePe | Paytm | Amazon Pay | BHIM | CRED | Groww | Zerodha | Upstox | Jupiter | Fi Money | Slice | Other. Empty string if not identifiable.",
-  "flagged": ${tx.flagged ? 'true' : 'false'},
-  "flag_reason": "Non-empty string ONLY if suspicious (unusually large unexplained amount, unknown source, potential fraud, test/dummy transactions). Otherwise empty string.",
-  "notes": "One complete sentence in plain English for a layperson. Include what it is, who to/from, and how paid. E.g.: 'Monthly home loan EMI of ₹28,500 paid to HDFC Bank via NACH auto-debit' or 'Paid ₹450 for groceries at More Supermarket via PhonePe UPI' or 'Salary credited from ABC Technologies Pvt Ltd via NEFT'"
+  "label": "3-7 word plain-English label. Be specific. E.g.: 'Swiggy food delivery', 'Maid Sushmita salary', 'HDFC credit card bill', 'Groww mutual fund SIP', 'Apple iCloud subscription', 'UiPath salary April', 'NMDC dividend', 'Tata AIA insurance premium', 'Rapido auto ride', 'Society maintenance charge', 'YouTube Premium', 'Splitwise settlement', 'Paytm wallet top-up', 'Transfer to friend Rahul'",
+  "merchant": "Clean merchant or person name. For food apps use: Swiggy / Zomato / Dunzo. For cab: Ola / Uber / Rapido. For investments: Groww / Zerodha. For individuals use their name from description. For BharatPe terminals use the shop/merchant name if visible.",
+  "website": "Official website only if confident (swiggy.in, zomato.com, amazon.in, groww.in, apple.com, airtel.in). Empty string if unsure.",
+  "category": "Exactly one from the list above",
+  "sub_category": "Specific sub-type from the examples above, or write your own if none fit",
+  "transaction_type": "UPI Payment | NEFT | IMPS | RTGS | ACH/NACH Auto-debit | ACH Credit | ATM Withdrawal | Cash Deposit | Salary Credit | Dividend Credit | Bill Payment | Card Payment | Wallet Top-up | Refund | Cashback | Standing Instruction | Other",
+  "recipient_type": "Individual | Business | Investment Platform | Bank/NBFC | Insurance Company | Government | Self/Own Account | Wallet",
+  "payment_app": "GPay | PhonePe | Paytm | Amazon Pay | BHIM | CRED | Groww | Zerodha | Upstox | BharatPe | WhatsApp Pay | Apple Pay | Airtel Money | Other. Empty string if not applicable.",
+  "flagged": ${tx.flagged ?? false},
+  "flag_reason": "Non-empty ONLY if genuinely suspicious: unknown large credit, possible fraud, test transactions. Empty string for normal transactions.",
+  "notes": "One clear sentence a layperson can understand. Include: what it is, who sent/received, how. E.g.: 'Monthly SIP of ₹3,000 debited to Groww for mutual fund investment via NACH auto-debit' or 'Maid salary paid to Sushmita Gupta via PhonePe UPI' or 'Salary of ₹3.84L credited from UiPath Robotic Process Automation via NEFT' or 'Apple iCloud 50GB subscription charged via UPI mandate'"
 }`;
 
   const raw = await geminiText(prompt);
