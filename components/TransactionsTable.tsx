@@ -11,6 +11,8 @@ interface Transaction {
   value_date?: string;
   description: string;
   remarks?: string;
+  label?: string;
+  notes?: string;
   merchant?: string;
   amount: number;
   currency: string;
@@ -25,6 +27,10 @@ interface Transaction {
   upi_id?: string;
   location?: string;
   category?: string;
+  sub_category?: string;
+  transaction_type?: string;
+  recipient_type?: string;
+  payment_app?: string;
   website?: string;
   flagged: boolean;
   flag_reason?: string;
@@ -49,24 +55,29 @@ interface TransactionsTableProps {
 }
 
 type ColKey =
-  | 'date' | 'value_date' | 'description' | 'remarks'
+  | 'date' | 'value_date' | 'description' | 'remarks' | 'notes'
   | 'withdrawal' | 'deposit' | 'amount' | 'balance'
-  | 'mode' | 'merchant' | 'category'
+  | 'mode' | 'merchant' | 'category' | 'sub_category' | 'transaction_type' | 'payment_app' | 'recipient_type'
   | 'counterparty' | 'counterparty_account' | 'counterparty_bank'
   | 'upi_id' | 'transaction_id' | 'reference_number' | 'location'
   | 'document' | 'status';
 
 const ALL_COLUMNS: { key: ColKey; label: string; defaultVisible: boolean }[] = [
   { key: 'date',                label: 'Date',               defaultVisible: true  },
-  { key: 'description',         label: 'Description',        defaultVisible: true  },
+  { key: 'description',         label: 'Description / Label',defaultVisible: true  },
   { key: 'withdrawal',          label: 'Withdrawal (Dr)',     defaultVisible: true  },
   { key: 'deposit',             label: 'Deposit (Cr)',        defaultVisible: true  },
   { key: 'balance',             label: 'Balance',            defaultVisible: true  },
-  { key: 'mode',                label: 'Mode',               defaultVisible: true  },
-  { key: 'merchant',            label: 'Merchant',           defaultVisible: true  },
   { key: 'category',            label: 'Category',           defaultVisible: true  },
+  { key: 'sub_category',        label: 'Sub-category',       defaultVisible: true  },
+  { key: 'merchant',            label: 'Merchant / Recipient',defaultVisible: true  },
+  { key: 'transaction_type',    label: 'Txn Type',           defaultVisible: true  },
   { key: 'counterparty',        label: 'Counterparty',       defaultVisible: true  },
   { key: 'status',              label: 'Status',             defaultVisible: true  },
+  { key: 'notes',               label: 'Notes (AI)',         defaultVisible: false },
+  { key: 'mode',                label: 'Mode',               defaultVisible: false },
+  { key: 'payment_app',         label: 'Payment App',        defaultVisible: false },
+  { key: 'recipient_type',      label: 'Recipient Type',     defaultVisible: false },
   { key: 'value_date',          label: 'Value Date',         defaultVisible: false },
   { key: 'amount',              label: 'Amount (combined)',  defaultVisible: false },
   { key: 'remarks',             label: 'Remarks',            defaultVisible: false },
@@ -178,15 +189,20 @@ export function TransactionsTable({
               </th>
               {vis('date')                 && <th className="text-left p-3 font-medium whitespace-nowrap">Date</th>}
               {vis('value_date')           && <th className="text-left p-3 font-medium whitespace-nowrap">Value Date</th>}
-              {vis('description')          && <th className="text-left p-3 font-medium">Description</th>}
+              {vis('description')          && <th className="text-left p-3 font-medium">Description / Label</th>}
               {vis('remarks')              && <th className="text-left p-3 font-medium">Remarks</th>}
-              {vis('withdrawal')            && <th className="text-right p-3 font-medium text-red-600">Withdrawal (Dr)</th>}
+              {vis('notes')                && <th className="text-left p-3 font-medium">Notes (AI)</th>}
+              {vis('withdrawal')           && <th className="text-right p-3 font-medium text-red-600">Withdrawal (Dr)</th>}
               {vis('deposit')              && <th className="text-right p-3 font-medium text-green-600">Deposit (Cr)</th>}
               {vis('amount')               && <th className="text-right p-3 font-medium">Amount</th>}
               {vis('balance')              && <th className="text-right p-3 font-medium">Balance</th>}
               {vis('mode')                 && <th className="text-left p-3 font-medium">Mode</th>}
-              {vis('merchant')             && <th className="text-left p-3 font-medium">Merchant</th>}
+              {vis('payment_app')          && <th className="text-left p-3 font-medium">Payment App</th>}
+              {vis('merchant')             && <th className="text-left p-3 font-medium">Merchant / Recipient</th>}
               {vis('category')             && <th className="text-left p-3 font-medium">Category</th>}
+              {vis('sub_category')         && <th className="text-left p-3 font-medium">Sub-category</th>}
+              {vis('transaction_type')     && <th className="text-left p-3 font-medium">Txn Type</th>}
+              {vis('recipient_type')       && <th className="text-left p-3 font-medium">Recipient Type</th>}
               {vis('counterparty')         && <th className="text-left p-3 font-medium">Counterparty</th>}
               {vis('counterparty_account') && <th className="text-left p-3 font-medium">Counterparty A/C</th>}
               {vis('counterparty_bank')    && <th className="text-left p-3 font-medium">Counterparty Bank</th>}
@@ -217,12 +233,24 @@ export function TransactionsTable({
                 )}
                 {vis('description') && (
                   <td className="p-3 max-w-xs">
-                    <div className="truncate" title={tx.description}>{tx.description}</div>
+                    {tx.label && tx.label !== tx.description ? (
+                      <div>
+                        <div className="font-medium text-sm truncate" title={tx.label}>{tx.label}</div>
+                        <div className="text-[11px] text-muted-foreground truncate mt-0.5" title={tx.description}>{tx.description}</div>
+                      </div>
+                    ) : (
+                      <div className="truncate" title={tx.description}>{tx.description}</div>
+                    )}
                   </td>
                 )}
                 {vis('remarks') && (
                   <td className="p-3 max-w-xs text-muted-foreground">
                     <div className="truncate" title={tx.remarks || ''}>{tx.remarks || '-'}</div>
+                  </td>
+                )}
+                {vis('notes') && (
+                  <td className="p-3 max-w-sm text-muted-foreground text-xs">
+                    <div className="line-clamp-2" title={tx.notes || ''}>{tx.notes || '-'}</div>
                   </td>
                 )}
                 {vis('withdrawal') && (
@@ -256,6 +284,11 @@ export function TransactionsTable({
                     {tx.mode ? <Badge variant="secondary" className="text-xs font-mono">{tx.mode}</Badge> : '-'}
                   </td>
                 )}
+                {vis('payment_app') && (
+                  <td className="p-3">
+                    {tx.payment_app ? <Badge variant="secondary" className="text-xs">{tx.payment_app}</Badge> : '-'}
+                  </td>
+                )}
                 {vis('merchant') && (
                   <td className="p-3 text-muted-foreground max-w-[140px]">
                     {tx.merchant ? (
@@ -268,6 +301,21 @@ export function TransactionsTable({
                 {vis('category') && (
                   <td className="p-3">
                     {tx.category ? <Badge variant="outline" className="text-xs">{tx.category}</Badge> : '-'}
+                  </td>
+                )}
+                {vis('sub_category') && (
+                  <td className="p-3 text-muted-foreground text-xs">
+                    {tx.sub_category || '-'}
+                  </td>
+                )}
+                {vis('transaction_type') && (
+                  <td className="p-3">
+                    {tx.transaction_type ? <Badge variant="secondary" className="text-xs">{tx.transaction_type}</Badge> : '-'}
+                  </td>
+                )}
+                {vis('recipient_type') && (
+                  <td className="p-3 text-muted-foreground text-xs">
+                    {tx.recipient_type || '-'}
                   </td>
                 )}
                 {vis('counterparty') && (

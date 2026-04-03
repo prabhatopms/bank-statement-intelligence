@@ -1,12 +1,27 @@
 "use client"
 
-import { useState, useEffect, useCallback } from 'react';
-import { Download, Sparkles, Filter, Search, RefreshCw } from 'lucide-react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { Download, Sparkles, Filter, Search, RefreshCw, X } from 'lucide-react';
 import { Button, Input, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Spinner, toast } from '@/lib/apollo-wind';
 import { TransactionsTable } from '@/components/TransactionsTable';
 import { StatsBar } from '@/components/StatsBar';
 
-const CATEGORIES = ['All', 'Food & Dining', 'Travel', 'Shopping', 'Utilities', 'Healthcare', 'Entertainment', 'Finance', 'Income', 'Transfer', 'Other'];
+const CATEGORIES = [
+  'All', 'Food & Dining', 'Travel & Transport', 'Shopping', 'Utilities & Bills',
+  'Healthcare', 'Entertainment', 'Finance & Investment', 'Income & Salary',
+  'Personal Transfer', 'EMI & Loans', 'ATM & Cash', 'Subscriptions',
+  'Insurance', 'Education', 'Government & Tax', 'Other',
+];
+
+interface EnrichProgress {
+  running: boolean;
+  current: number;
+  total: number;
+  processed: number;
+  failed: number;
+  currentDescription: string;
+  lastLabel: string;
+}
 
 export default function TransactionsPage() {
   const [transactions, setTransactions] = useState([]);
@@ -14,7 +29,11 @@ export default function TransactionsPage() {
   const [stats, setStats] = useState({ total: 0, total_debits: 0, total_credits: 0, flagged_count: 0, enriched_count: 0 });
   const [loading, setLoading] = useState(true);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [enrichingBulk, setEnrichingBulk] = useState(false);
+  const enrichAbortRef = useRef<AbortController | null>(null);
+  const [enrichProgress, setEnrichProgress] = useState<EnrichProgress>({
+    running: false, current: 0, total: 0, processed: 0, failed: 0,
+    currentDescription: '', lastLabel: '',
+  });
 
   const [filters, setFilters] = useState({
     search: '',
@@ -60,42 +79,65 @@ export default function TransactionsPage() {
 
   useEffect(() => { fetchTransactions(); }, [fetchTransactions]);
 
-  const handleEnrichSelected = async (mode: 'ai' | 'search' = 'ai') => {
-    if (selectedIds.length === 0) return;
-    setEnrichingBulk(true);
-    try {
-      const res = await fetch('/api/transactions/enrich-bulk', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids: selectedIds, mode }),
-      });
-      const data = await res.json();
-      toast('Bulk enrichment complete', { description: `${data.processed} transactions enriched` });
-      setSelectedIds([]);
-      fetchTransactions();
-    } catch {
-      toast.error('Bulk enrichment failed');
-    } finally {
-      setEnrichingBulk(false);
-    }
-  };
+  const runEnrichment = useCallback(async (body: object) => {
+    if (enrichProgress.running) return;
+    const controller = new AbortController();
+    enrichAbortRef.current = controller;
+    setEnrichProgress({ running: true, current: 0, total: 0, processed: 0, failed: 0, currentDescription: 'Starting...', lastLabel: '' });
 
-  const handleEnrichAll = async () => {
-    setEnrichingBulk(true);
     try {
       const res = await fetch('/api/transactions/enrich-bulk', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enrichAll: true, mode: 'ai' }),
+        body: JSON.stringify(body),
+        signal: controller.signal,
       });
-      const data = await res.json();
-      toast('Enrichment started', { description: `Processing ${data.processed} transactions` });
-      fetchTransactions();
-    } catch {
-      toast.error('Enrichment failed');
-    } finally {
-      setEnrichingBulk(false);
+      if (!res.body) throw new Error('No stream');
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const ev = JSON.parse(line.slice(6));
+            if (ev.type === 'started') {
+              setEnrichProgress(p => ({ ...p, total: ev.total }));
+            } else if (ev.type === 'progress') {
+              setEnrichProgress(p => ({ ...p, current: ev.current, total: ev.total, currentDescription: ev.description }));
+            } else if (ev.type === 'enriched') {
+              setEnrichProgress(p => ({ ...p, processed: p.processed + 1, lastLabel: ev.label }));
+            } else if (ev.type === 'failed') {
+              setEnrichProgress(p => ({ ...p, failed: p.failed + 1 }));
+            } else if (ev.type === 'done') {
+              setEnrichProgress(p => ({ ...p, running: false, processed: ev.processed, failed: ev.failed, total: ev.total }));
+              toast('Enrichment complete', { description: `${ev.processed} enriched · ${ev.failed} failed` });
+              setSelectedIds([]);
+              fetchTransactions();
+            }
+          } catch { /* skip */ }
+        }
+      }
+    } catch (err) {
+      if (!controller.signal.aborted) {
+        toast.error('Enrichment failed', { description: err instanceof Error ? err.message : 'Unknown error' });
+      }
+      setEnrichProgress(p => ({ ...p, running: false }));
     }
+  }, [enrichProgress.running, fetchTransactions]);
+
+  const handleEnrichSelected = () => runEnrichment({ ids: selectedIds });
+  const handleEnrichAll = () => runEnrichment({ enrichAll: true });
+  const handleStopEnrich = () => {
+    enrichAbortRef.current?.abort();
+    setEnrichProgress(p => ({ ...p, running: false }));
   };
 
   const handleExport = () => {
@@ -111,13 +153,13 @@ export default function TransactionsPage() {
         </div>
         <div className="flex gap-2">
           {selectedIds.length > 0 && (
-            <Button variant="outline" onClick={() => handleEnrichSelected('ai')} disabled={enrichingBulk}>
+            <Button variant="outline" onClick={handleEnrichSelected} disabled={enrichProgress.running}>
               <Sparkles className="h-4 w-4 mr-2" />
               Enrich Selected ({selectedIds.length})
             </Button>
           )}
-          <Button variant="outline" onClick={handleEnrichAll} disabled={enrichingBulk}>
-            {enrichingBulk ? <Spinner size="sm" className="mr-2" /> : <Sparkles className="h-4 w-4 mr-2" />}
+          <Button variant="outline" onClick={handleEnrichAll} disabled={enrichProgress.running}>
+            {enrichProgress.running ? <Spinner size="sm" className="mr-2" /> : <Sparkles className="h-4 w-4 mr-2" />}
             Enrich All Unenriched
           </Button>
           <Button variant="outline" onClick={handleExport}>
@@ -128,6 +170,51 @@ export default function TransactionsPage() {
       </div>
 
       <StatsBar stats={stats} />
+
+      {/* Enrichment progress panel */}
+      {(enrichProgress.running || enrichProgress.total > 0) && (
+        <div className="rounded-lg border bg-gray-950 text-gray-100 text-xs font-mono p-4 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              {enrichProgress.running
+                ? <span className="text-yellow-400 animate-pulse">● Enriching...</span>
+                : <span className="text-green-400">✓ Enrichment complete</span>}
+              <span className="text-gray-400">
+                {enrichProgress.processed} done · {enrichProgress.failed} failed · {enrichProgress.total} total
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              {enrichProgress.running && (
+                <button onClick={handleStopEnrich} className="flex items-center gap-1 text-red-400 hover:text-red-300 px-2 py-0.5 border border-red-800 rounded text-xs">
+                  <X className="h-3 w-3" /> Stop
+                </button>
+              )}
+              {!enrichProgress.running && (
+                <button onClick={() => setEnrichProgress(p => ({ ...p, total: 0 }))} className="text-gray-500 hover:text-gray-300 px-1">×</button>
+              )}
+            </div>
+          </div>
+          {/* Progress bar */}
+          {enrichProgress.total > 0 && (
+            <div className="w-full bg-gray-800 rounded-full h-1.5">
+              <div
+                className="bg-yellow-400 h-1.5 rounded-full transition-all duration-300"
+                style={{ width: `${Math.round((enrichProgress.current / enrichProgress.total) * 100)}%` }}
+              />
+            </div>
+          )}
+          {enrichProgress.running && enrichProgress.currentDescription && (
+            <div className="text-gray-400 truncate">
+              Processing: <span className="text-gray-200">{enrichProgress.currentDescription}</span>
+            </div>
+          )}
+          {enrichProgress.lastLabel && (
+            <div className="text-gray-500 truncate">
+              Last enriched: <span className="text-green-400">{enrichProgress.lastLabel}</span>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="bg-white rounded-lg border p-4">
         <div className="flex items-center gap-2 mb-4">

@@ -71,6 +71,14 @@ async function migrate() {
   // Extraction metadata for adaptive improvement
   await sql`ALTER TABLE documents ADD COLUMN IF NOT EXISTS extraction_meta JSONB`;
 
+  // Richer enrichment fields
+  await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS label TEXT`;
+  await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS sub_category TEXT`;
+  await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS transaction_type TEXT`;
+  await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS recipient_type TEXT`;
+  await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS payment_app TEXT`;
+  await sql`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS notes TEXT`;
+
   await sql`
     CREATE INDEX IF NOT EXISTS idx_documents_user_id ON documents(user_id)
   `;
