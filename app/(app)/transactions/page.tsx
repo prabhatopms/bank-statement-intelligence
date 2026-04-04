@@ -15,12 +15,16 @@ const CATEGORY_OPTIONS = ['All', ...CATEGORIES];
 
 interface EnrichProgress {
   running: boolean;
+  // current batch
   current: number;
   total: number;
-  processed: number;
-  failed: number;
   currentDescription: string;
   lastLabel: string;
+  // cumulative across all batches
+  totalProcessed: number;
+  totalFailed: number;
+  batchNum: number;
+  remaining: number;
 }
 
 export default function TransactionsPage() {
@@ -30,9 +34,10 @@ export default function TransactionsPage() {
   const [loading, setLoading] = useState(true);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const enrichAbortRef = useRef<AbortController | null>(null);
+  const allFailedIdsRef = useRef<string[]>([]);
   const [enrichProgress, setEnrichProgress] = useState<EnrichProgress>({
-    running: false, current: 0, total: 0, processed: 0, failed: 0,
-    currentDescription: '', lastLabel: '',
+    running: false, current: 0, total: 0, currentDescription: '', lastLabel: '',
+    totalProcessed: 0, totalFailed: 0, batchNum: 0, remaining: 0,
   });
 
   const [filters, setFilters] = useState({
@@ -79,57 +84,97 @@ export default function TransactionsPage() {
 
   useEffect(() => { fetchTransactions(); }, [fetchTransactions]);
 
-  const runEnrichment = useCallback(async (body: object) => {
+  const runEnrichment = useCallback(async (body: { ids?: string[]; enrichAll?: boolean }) => {
     if (enrichProgress.running) return;
     const controller = new AbortController();
     enrichAbortRef.current = controller;
-    setEnrichProgress({ running: true, current: 0, total: 0, processed: 0, failed: 0, currentDescription: 'Starting...', lastLabel: '' });
+    allFailedIdsRef.current = [];
+
+    setEnrichProgress({
+      running: true, current: 0, total: 0, currentDescription: 'Starting...', lastLabel: '',
+      totalProcessed: 0, totalFailed: 0, batchNum: 0, remaining: 0,
+    });
+
+    let totalProcessed = 0;
+    let totalFailed = 0;
+    let shouldContinue = true;
+    let batchNum = 0;
 
     try {
-      const res = await fetch('/api/transactions/enrich-bulk', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      if (!res.body) throw new Error('No stream');
+      while (shouldContinue && !controller.signal.aborted) {
+        batchNum++;
+        const requestBody = body.enrichAll
+          ? { enrichAll: true, excludeIds: allFailedIdsRef.current, limit: 100 }
+          : body;
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = '';
+        setEnrichProgress(p => ({ ...p, batchNum, current: 0, currentDescription: 'Loading batch...' }));
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const lines = buf.split('\n');
-        buf = lines.pop() ?? '';
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          try {
-            const ev = JSON.parse(line.slice(6));
-            if (ev.type === 'started') {
-              setEnrichProgress(p => ({ ...p, total: ev.total }));
-            } else if (ev.type === 'progress') {
-              setEnrichProgress(p => ({ ...p, current: ev.current, total: ev.total, currentDescription: ev.description }));
-            } else if (ev.type === 'enriched') {
-              setEnrichProgress(p => ({ ...p, processed: p.processed + 1, lastLabel: ev.label }));
-            } else if (ev.type === 'failed') {
-              setEnrichProgress(p => ({ ...p, failed: p.failed + 1 }));
-            } else if (ev.type === 'done') {
-              setEnrichProgress(p => ({ ...p, running: false, processed: ev.processed, failed: ev.failed, total: ev.total }));
-              toast.success('Enrichment complete', { description: `${ev.processed} enriched · ${ev.failed} failed` });
-              setSelectedIds([]);
-              fetchTransactions();
-            }
-          } catch { /* skip */ }
+        const res = await fetch('/api/transactions/enrich-bulk', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestBody),
+          signal: controller.signal,
+        });
+        if (!res.body) throw new Error('No stream');
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        let batchDone = false;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split('\n');
+          buf = lines.pop() ?? '';
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            try {
+              const ev = JSON.parse(line.slice(6));
+              if (ev.type === 'started') {
+                setEnrichProgress(p => ({ ...p, total: ev.total, current: 0 }));
+              } else if (ev.type === 'progress') {
+                setEnrichProgress(p => ({ ...p, current: ev.current, total: ev.total, currentDescription: ev.description }));
+              } else if (ev.type === 'enriched') {
+                totalProcessed++;
+                setEnrichProgress(p => ({ ...p, totalProcessed, lastLabel: ev.label }));
+              } else if (ev.type === 'failed') {
+                totalFailed++;
+                allFailedIdsRef.current.push(ev.id);
+                setEnrichProgress(p => ({ ...p, totalFailed }));
+              } else if (ev.type === 'done') {
+                batchDone = true;
+                const remaining: number = ev.remaining ?? 0;
+                // Only continue looping for enrichAll mode
+                shouldContinue = body.enrichAll === true && remaining > 0;
+                setEnrichProgress(p => ({ ...p, remaining }));
+                if (!shouldContinue) {
+                  setEnrichProgress(p => ({ ...p, running: false }));
+                  toast.success('Enrichment complete', {
+                    description: `${totalProcessed} enriched · ${totalFailed} skipped`,
+                  });
+                  setSelectedIds([]);
+                  fetchTransactions();
+                }
+              }
+            } catch { /* skip */ }
+          }
         }
+
+        if (!batchDone) shouldContinue = false;
       }
     } catch (err) {
       if (!controller.signal.aborted) {
         toast.error('Enrichment failed', { description: err instanceof Error ? err.message : 'Unknown error' });
       }
       setEnrichProgress(p => ({ ...p, running: false }));
+      fetchTransactions();
+    }
+
+    if (controller.signal.aborted) {
+      setEnrichProgress(p => ({ ...p, running: false }));
+      fetchTransactions();
     }
   }, [enrichProgress.running, fetchTransactions]);
 
@@ -172,15 +217,21 @@ export default function TransactionsPage() {
       <StatsBar stats={stats} />
 
       {/* Enrichment progress panel */}
-      {(enrichProgress.running || enrichProgress.total > 0) && (
+      {(enrichProgress.running || enrichProgress.batchNum > 0) && (
         <div className="rounded-lg border bg-gray-950 text-gray-100 text-xs font-mono p-4 space-y-2">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               {enrichProgress.running
                 ? <span className="text-yellow-400 animate-pulse">● Enriching...</span>
-                : <span className="text-green-400">✓ Enrichment complete</span>}
+                : <span className="text-green-400">✓ Done</span>}
+              {enrichProgress.batchNum > 1 && (
+                <span className="text-blue-400">Batch {enrichProgress.batchNum}</span>
+              )}
               <span className="text-gray-400">
-                {enrichProgress.processed} done · {enrichProgress.failed} failed · {enrichProgress.total} total
+                {enrichProgress.totalProcessed} enriched
+                {enrichProgress.totalFailed > 0 && <> · <span className="text-red-400">{enrichProgress.totalFailed} skipped</span></>}
+                {enrichProgress.total > 0 && <> · {enrichProgress.current}/{enrichProgress.total} this batch</>}
+                {enrichProgress.running && enrichProgress.remaining > 0 && <> · <span className="text-yellow-300">{enrichProgress.remaining} remaining</span></>}
               </span>
             </div>
             <div className="flex items-center gap-2">
@@ -190,11 +241,11 @@ export default function TransactionsPage() {
                 </button>
               )}
               {!enrichProgress.running && (
-                <button onClick={() => setEnrichProgress(p => ({ ...p, total: 0 }))} className="text-gray-500 hover:text-gray-300 px-1">×</button>
+                <button onClick={() => setEnrichProgress(p => ({ ...p, batchNum: 0 }))} className="text-gray-500 hover:text-gray-300 px-1">×</button>
               )}
             </div>
           </div>
-          {/* Progress bar */}
+          {/* Progress bar — current batch */}
           {enrichProgress.total > 0 && (
             <div className="w-full bg-gray-800 rounded-full h-1.5">
               <div
