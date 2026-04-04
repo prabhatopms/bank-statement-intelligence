@@ -35,6 +35,7 @@
     "pdf-parse": "^1.1.1",
     "react": "^18",
     "react-dom": "^18",
+    "recharts": "^3.8.1",
     "sonner": "^2.0.7",
     "tailwind-merge": "^2.0.0",
     "tailwindcss-animate": "^1.0.7"

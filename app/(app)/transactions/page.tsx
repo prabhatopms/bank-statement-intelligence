@@ -1,6 +1,7 @@
 "use client"
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { Download, Sparkles, Filter, Search, RefreshCw, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -27,7 +28,8 @@ interface EnrichProgress {
   remaining: number;
 }
 
-export default function TransactionsPage() {
+function TransactionsPageInner() {
+  const searchParams = useSearchParams();
   const [transactions, setTransactions] = useState([]);
   const [pagination, setPagination] = useState({ page: 1, pages: 1, total: 0 });
   const [stats, setStats] = useState({ total: 0, total_debits: 0, total_credits: 0, flagged_count: 0, enriched_count: 0 });
@@ -41,16 +43,16 @@ export default function TransactionsPage() {
   });
 
   const [filters, setFilters] = useState({
-    search: '',
-    category: '',
-    flagged: '',
-    enriched: '',
-    date_from: '',
-    date_to: '',
-    amount_min: '',
-    amount_max: '',
-    withdrawal_min: '',
-    withdrawal_max: '',
+    search: searchParams.get('search') || '',
+    category: searchParams.get('category') || '',
+    flagged: searchParams.get('flagged') || '',
+    enriched: searchParams.get('enriched') || '',
+    date_from: searchParams.get('date_from') || '',
+    date_to: searchParams.get('date_to') || '',
+    amount_min: searchParams.get('amount_min') || '',
+    amount_max: searchParams.get('amount_max') || '',
+    withdrawal_min: searchParams.get('withdrawal_min') || '',
+    withdrawal_max: searchParams.get('withdrawal_max') || '',
     page: 1,
   });
 
@@ -366,5 +368,13 @@ export default function TransactionsPage() {
         />
       )}
     </div>
+  );
+}
+
+export default function TransactionsPage() {
+  return (
+    <Suspense>
+      <TransactionsPageInner />
+    </Suspense>
   );
 }

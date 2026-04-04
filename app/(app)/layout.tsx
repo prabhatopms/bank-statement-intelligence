@@ -4,7 +4,7 @@ import { auth } from '@clerk/nextjs/server';
 import { redirect } from 'next/navigation';
 import { UserButton } from '@clerk/nextjs';
 import Link from 'next/link';
-import { FileText, BarChart2, Settings, CreditCard, TrendingUp } from 'lucide-react';
+import { FileText, BarChart2, Settings, CreditCard, TrendingUp, LayoutDashboard } from 'lucide-react';
 
 export default async function AppLayout({
   children,
@@ -25,6 +25,10 @@ export default async function AppLayout({
                 <span className="font-bold text-lg text-gray-900">BankIQ</span>
               </div>
               <div className="flex gap-6">
+                <Link href="/dashboard" className="flex items-center gap-2 text-sm font-medium text-gray-600 hover:text-gray-900 transition-colors">
+                  <LayoutDashboard className="h-4 w-4" />
+                  Dashboard
+                </Link>
                 <Link href="/documents" className="flex items-center gap-2 text-sm font-medium text-gray-600 hover:text-gray-900 transition-colors">
                   <FileText className="h-4 w-4" />
                   Documents
