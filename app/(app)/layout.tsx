@@ -5,7 +5,7 @@ import { redirect } from 'next/navigation';
 import { UserButton } from '@clerk/nextjs';
 import Link from 'next/link';
 import { FileText, BarChart2, Settings, CreditCard, TrendingUp, LayoutDashboard } from 'lucide-react';
-import { EnrichmentStatusBar } from '@/components/EnrichmentStatusBar';
+import { EnrichmentIndicator } from '@/components/EnrichmentStatusBar';
 
 export default async function AppLayout({
   children,
@@ -48,11 +48,13 @@ export default async function AppLayout({
                 </Link>
               </div>
             </div>
-            <UserButton afterSignOutUrl="/sign-in" />
+            <div className="flex items-center gap-2">
+              <EnrichmentIndicator />
+              <UserButton afterSignOutUrl="/sign-in" />
+            </div>
           </div>
         </div>
       </nav>
-      <EnrichmentStatusBar />
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {children}
       </main>
