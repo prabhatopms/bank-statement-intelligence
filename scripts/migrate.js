@@ -91,6 +91,23 @@ async function migrate() {
     CREATE INDEX IF NOT EXISTS idx_transactions_document_id ON transactions(document_id)
   `;
 
+  // Background enrichment job state (per user)
+  await sql`
+    CREATE TABLE IF NOT EXISTS enrichment_jobs (
+      user_id TEXT PRIMARY KEY,
+      enabled BOOLEAN DEFAULT true,
+      status TEXT DEFAULT 'idle' CHECK (status IN ('idle','running','paused')),
+      processed_count INT DEFAULT 0,
+      failed_count INT DEFAULT 0,
+      total_unenriched INT DEFAULT 0,
+      failed_ids JSONB DEFAULT '[]',
+      last_label TEXT,
+      last_error TEXT,
+      last_run_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ DEFAULT now()
+    )
+  `;
+
   console.log('Migrations complete!');
 }
 

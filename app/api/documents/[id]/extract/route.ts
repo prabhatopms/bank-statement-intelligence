@@ -548,6 +548,13 @@ export async function POST(request: NextRequest, { params }: { params: { id: str
         send({ type: 'done', inserted, skipped, total: transactions!.length });
       }
 
+      // Auto-enable background enrichment for this user
+      await sql`
+        INSERT INTO enrichment_jobs (user_id, enabled, status)
+        VALUES (${userId}, true, 'idle')
+        ON CONFLICT (user_id) DO UPDATE SET enabled = true, updated_at = now()
+      `;
+
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       console.error('Extraction error:', msg);
