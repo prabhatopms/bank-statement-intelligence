@@ -26,6 +26,8 @@ export async function GET(request: NextRequest) {
     const amountMax = searchParams.get('amount_max') || '';
     const withdrawalMin = searchParams.get('withdrawal_min') || '';
     const withdrawalMax = searchParams.get('withdrawal_max') || '';
+    const subCategory = searchParams.get('sub_category') || '';
+    const txType = searchParams.get('type') || '';
 
     const params: unknown[] = [userId];
     const conditions: string[] = ['t.user_id = $1'];
@@ -69,6 +71,13 @@ export async function GET(request: NextRequest) {
     if (withdrawalMax) {
       params.push(parseFloat(withdrawalMax));
       conditions.push(`(t.type = 'debit' AND t.amount <= $${params.length})`);
+    }
+    if (subCategory) {
+      params.push(subCategory);
+      conditions.push(`t.sub_category = $${params.length}`);
+    }
+    if (txType === 'debit' || txType === 'credit') {
+      conditions.push(`t.type = '${txType}'`);
     }
 
     const whereClause = conditions.join(' AND ');

@@ -56,7 +56,7 @@ export const CATEGORIES = [
 ];
 
 // Sub-categories mapped to each main category (for reference in prompt)
-const SUB_CATEGORY_MAP: Record<string, string[]> = {
+export const SUB_CATEGORY_MAP: Record<string, string[]> = {
   'Food & Dining': ['Food Delivery (Swiggy/Zomato/Dunzo)', 'Restaurant / Cafe / Dining Out', 'Grocery & Supermarket', 'Quick Commerce (Blinkit/Zepto/Instamart)'],
   'Transport & Travel': ['Cab / Auto / Bike Taxi (Ola/Uber/Rapido)', 'Metro / Bus / Public Transport', 'Train Ticket', 'Flight Ticket', 'Hotel / Accommodation', 'Fuel', 'Parking', 'Delhi Transport / IOCL'],
   'Shopping': ['Online Shopping (Amazon/Flipkart)', 'Clothing & Fashion', 'Electronics & Gadgets', 'Household Items', 'Books & Stationery', 'Other Retail'],
